@@ -1,0 +1,20 @@
+[package]
+name = "auraline-native"
+version = "0.1.0"
+description = "AuraLine — 专为办公电脑打造的极简QQ音乐声学隐身细线 (Tauri v2 + Rust WASAPI 声卡直连)"
+authors = ["AuraLine"]
+edition = "2021"
+
+[lib]
+name = "auraline_native_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+cpal = "0.15"
+rustfft = "6.2"

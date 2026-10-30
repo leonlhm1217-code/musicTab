@@ -1,5 +1,3 @@
-export type AudioSourceMode = 'none' | 'system' | 'mic' | 'demo' | 'file';
-
 export type AuraThemeId = 'minimal_white' | 'deep_sea' | 'vibrant_pulse' | 'forest_mist';
 
 export type AutoSleepBehavior = 'freeze' | 'low_fps';
