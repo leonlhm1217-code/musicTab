@@ -1,0 +1,64 @@
+name: Build Windows Standalone EXE
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Rust Stable Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Build Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Frontend & Tauri CLI Dependencies
+        run: npm install
+
+      - name: Ensure Windows .ico and .png Icons Exist
+        run: npx tauri icon src-tauri/icons/app-icon.svg
+
+      - name: Build Native Standalone Windows .exe (Tauri + Rust)
+        run: npx tauri build
+
+      - name: Prepare Portable Single-File AuraLine-Portable.exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-exe
+          Copy-Item "src-tauri/target/release/auraline-native.exe" "dist-exe/AuraLine-Portable.exe" -ErrorAction SilentlyContinue
+          if (!(Test-Path "dist-exe/AuraLine-Portable.exe")) {
+            Get-ChildItem "src-tauri/target/release/*.exe" | Select-Object -First 1 | Copy-Item -Destination "dist-exe/AuraLine-Portable.exe"
+          }
+
+      - name: Upload AuraLine-Portable.exe (免安装绿色单文件版)
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuraLine-Portable-exe
+          path: dist-exe/AuraLine-Portable.exe
+          if-no-files-found: error
+
+      - name: Upload Windows Installer Bundles (NSIS / MSI 安装包)
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuraLine-Windows-Installer
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: ignore

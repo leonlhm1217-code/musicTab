@@ -1,6 +1,6 @@
 {
   "name": "AuraLyric Studio — QQ音乐动态歌词流体光晕伴侣",
   "description": "专为办公电脑打造的极简QQ音乐声学隐身细线，100%浏览器本地内存解析音量、音调与三频乐器能量，零云端上传。",
-  "requestFramePermissions": ["microphone", "display-capture"],
+  "requestFramePermissions": [],
   "majorCapabilities": []
 }

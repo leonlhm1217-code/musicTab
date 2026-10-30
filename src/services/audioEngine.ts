@@ -4,6 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { AudioTelemetry } from '../types/audio';
 
 const NOTE_STRINGS = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const WINDOW_POS_STORAGE_KEY = 'auraline_window_pos_v1';
 
 export interface TauriTelemetryPayload {
   rmsVolume: number;
@@ -44,10 +45,10 @@ function frequencyToNoteName(freq: number): string {
 export class RealtimeAudioEngine {
   private ctx: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
-  private mediaStream: MediaStream | null = null;
-  private sourceNode: AudioNode | null = null;
   private silentSynthTimer: number | null = null;
   private unlistenTauri: UnlistenFn | null = null;
+  private unlistenTray: UnlistenFn | null = null;
+  private unlistenMoved: UnlistenFn | null = null;
   private latestNativePacket: TauriTelemetryPayload | null = null;
   private isTauriNative = false;
 
@@ -88,7 +89,8 @@ export class RealtimeAudioEngine {
   }
 
   /**
-   * Starts native frameless OS window dragging via @tauri-apps/api/window or Rust command.
+   * Starts native frameless OS window dragging via @tauri-apps/api/window or Rust command,
+   * and persists the final screen coordinates after dragging completes.
    */
   public async startNativeWindowDrag(): Promise<void> {
     if (!this.isRunningInTauri()) return;
@@ -101,19 +103,93 @@ export class RealtimeAudioEngine {
         // Ignore in web preview fallback
       }
     }
+    await this.saveCurrentWindowPosition();
   }
 
   /**
-   * Automatically connects to the sound card on launch with zero manual buttons:
-   * 1. In Tauri v2 Native Desktop App: Uses official `@tauri-apps/api/event` `listen('audio-telemetry')`
-   *    (plus `withGlobalTauri` fallback) to receive real-time Rust `cpal` WASAPI Loopback packets.
-   * 2. In Web Preview Fallback: Attempts silent loopback device binding, or runs an internal zero-speaker-volume
-   *    acoustic signal generator into AnalyserNode so the stealth line can be previewed and tuned immediately.
+   * Restores the saved desktop screen position (X, Y) on `.exe` launch,
+   * or docks the stealth fine line at the bottom center of the primary screen on first launch.
+   */
+  public async initWindowPositionMemory(): Promise<void> {
+    if (!this.isRunningInTauri()) return;
+    try {
+      const raw = localStorage.getItem(WINDOW_POS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { x: number; y: number };
+        if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
+          await invoke('set_window_position', { x: parsed.x, y: parsed.y });
+        }
+      } else {
+        const [x, y] = await invoke<[number, number]>('reset_window_to_bottom_center');
+        localStorage.setItem(WINDOW_POS_STORAGE_KEY, JSON.stringify({ x, y }));
+      }
+
+      // Listen for native OS window move events to persist position automatically
+      const win = getCurrentWindow();
+      this.unlistenMoved = await win.onMoved(({ payload }) => {
+        try {
+          localStorage.setItem(
+            WINDOW_POS_STORAGE_KEY,
+            JSON.stringify({ x: payload.x, y: payload.y })
+          );
+        } catch {
+          // ignore storage quota errors
+        }
+      });
+    } catch {
+      // Ignore outside Tauri runtime
+    }
+  }
+
+  public async saveCurrentWindowPosition(): Promise<void> {
+    if (!this.isRunningInTauri()) return;
+    try {
+      const [x, y] = await invoke<[number, number]>('get_window_position');
+      localStorage.setItem(WINDOW_POS_STORAGE_KEY, JSON.stringify({ x, y }));
+    } catch {
+      // ignore
+    }
+  }
+
+  public async resetWindowToBottomCenter(): Promise<void> {
+    if (!this.isRunningInTauri()) return;
+    try {
+      const [x, y] = await invoke<[number, number]>('reset_window_to_bottom_center');
+      localStorage.setItem(WINDOW_POS_STORAGE_KEY, JSON.stringify({ x, y }));
+    } catch {
+      // ignore
+    }
+  }
+
+  /**
+   * Subscribes to native Windows System Tray right-click menu actions emitted by Rust.
+   */
+  public async subscribeToTrayCommands(onCommand: (cmd: string) => void): Promise<void> {
+    if (!this.isRunningInTauri()) return;
+    try {
+      if (this.unlistenTray) {
+        this.unlistenTray();
+      }
+      this.unlistenTray = await listen<string>('tray-command', (event) => {
+        onCommand(event.payload);
+      });
+    } catch {
+      // ignore in web preview
+    }
+  }
+
+  /**
+   * Automatically connects to the sound card output on launch with ZERO microphone access:
+   * 1. In Tauri v2 Native `.exe`: Subscribes to Rust `cpal` `default_output_device()` WASAPI Loopback
+   *    stream (`"audio-telemetry"`). Microphones (`default_input_device`) are 100% physically untouched.
+   * 2. In Web Preview Fallback: Runs an internal zero-speaker-volume acoustic signal generator into
+   *    AnalyserNode (`navigator.mediaDevices.getUserMedia` is 100% removed so the browser never touches
+   *    or requests any microphone).
    */
   public async startAutoConnect(): Promise<void> {
     this.stopAll();
 
-    // 1. Official @tauri-apps/api/event Native Soundcard Subscription
+    // 1. Official @tauri-apps/api/event Native Soundcard Output Loopback Subscription
     if (this.isRunningInTauri()) {
       this.isTauriNative = true;
       try {
@@ -122,7 +198,6 @@ export class RealtimeAudioEngine {
         });
         return;
       } catch {
-        // Secondary fallback to global window.__TAURI__.event.listen
         try {
           if (window.__TAURI__?.event?.listen) {
             this.unlistenTauri = await window.__TAURI__.event.listen<TauriTelemetryPayload>(
@@ -139,38 +214,8 @@ export class RealtimeAudioEngine {
       }
     }
 
-    // 2. Web Environment Auto-Connect: Try binding default soundcard loopback / Stereo Mix silently
-    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-      try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const audioInputs = devices.filter((d) => d.kind === 'audioinput');
-        const loopbackRegex = /立体声混音|stereo mix|loopback|what u hear|cable|blackhole/i;
-        const preferred = audioInputs.find((d) => loopbackRegex.test(d.label));
-
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            ...(preferred && preferred.deviceId ? { deviceId: { exact: preferred.deviceId } } : {}),
-          },
-          video: false,
-        });
-
-        const ctx = this.ensureContext();
-        this.mediaStream = stream;
-        const src = ctx.createMediaStreamSource(stream);
-        src.connect(this.analyser!);
-        this.sourceNode = src;
-        return;
-      } catch {
-        // In cloud preview sandbox where unprompted getUserMedia is restricted,
-        // start internal zero-speaker-noise signal feed into AnalyserNode for live visual preview
-        this.startInternalPreviewSignal();
-      }
-    } else {
-      this.startInternalPreviewSignal();
-    }
+    // 2. Web Preview Mode: 100% zero microphone calls; use internal silent-speaker synth for visual preview
+    this.startInternalPreviewSignal();
   }
 
   private ensureContext(): AudioContext {
@@ -286,21 +331,17 @@ export class RealtimeAudioEngine {
       this.unlistenTauri();
       this.unlistenTauri = null;
     }
+    if (this.unlistenTray) {
+      this.unlistenTray();
+      this.unlistenTray = null;
+    }
+    if (this.unlistenMoved) {
+      this.unlistenMoved();
+      this.unlistenMoved = null;
+    }
     if (this.silentSynthTimer !== null) {
       window.clearInterval(this.silentSynthTimer);
       this.silentSynthTimer = null;
-    }
-    if (this.sourceNode) {
-      try {
-        this.sourceNode.disconnect();
-      } catch {
-        // ignore
-      }
-      this.sourceNode = null;
-    }
-    if (this.mediaStream) {
-      this.mediaStream.getTracks().forEach((t) => t.stop());
-      this.mediaStream = null;
     }
     this.latestNativePacket = null;
   }
@@ -315,7 +356,7 @@ export class RealtimeAudioEngine {
   ): AudioTelemetry {
     const nowMs = performance.now();
 
-    // 1. Tauri v2 Rust WASAPI Loopback Native Stream
+    // 1. Tauri v2 Rust WASAPI Output Loopback Native Stream
     if (this.isTauriNative && this.latestNativePacket) {
       const pkt = this.latestNativePacket;
       const bassEnergy = Math.min(1, Math.max(0, pkt.bassEnergy ?? 0.02));
@@ -374,14 +415,14 @@ export class RealtimeAudioEngine {
         dominantInstrumentLabel: isSleeping
           ? '自动休眠省电中'
           : pkt.deviceName
-          ? `声卡直连: ${pkt.deviceName}`
-          : '声卡直连运行中',
+          ? `声卡输出: ${pkt.deviceName}`
+          : '声卡输出直连运行中',
         silentDurationSec,
         isSleeping,
       };
     }
 
-    // 2. Web Audio AnalyserNode Path
+    // 2. Web Audio AnalyserNode Path (Preview only, zero microphone access)
     if (!this.analyser || !this.ctx) {
       const silentDurationSec = Math.max(0, (nowMs - this.silentStartMs) / 1000);
       const isSleeping = autoSleepEnabled && silentDurationSec >= autoSleepDelaySec;
@@ -398,7 +439,7 @@ export class RealtimeAudioEngine {
         springScale: 1.0,
         springVelocity: 0,
         waveformSlice: new Array(48).fill(0),
-        dominantInstrumentLabel: isSleeping ? '自动休眠省电中' : '声卡静默监听中',
+        dominantInstrumentLabel: isSleeping ? '自动休眠省电中' : '声卡输出静默监听中',
         silentDurationSec,
         isSleeping,
       };
@@ -514,7 +555,7 @@ export class RealtimeAudioEngine {
       springScale: this.springScale,
       springVelocity: this.springVelocity,
       waveformSlice,
-      dominantInstrumentLabel: isSleeping ? '自动休眠省电中' : '声卡直连运行中',
+      dominantInstrumentLabel: isSleeping ? '自动休眠省电中' : '声卡输出直连运行中',
       silentDurationSec,
       isSleeping,
     };

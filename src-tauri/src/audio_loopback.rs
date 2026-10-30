@@ -185,35 +185,36 @@ impl DspState {
     }
 }
 
-fn select_default_loopback_device(host: &cpal::Host) -> Option<(Device, SupportedStreamConfig, String)> {
-    // Priority 1: System Default Output Device (WASAPI Loopback captures speaker/headphone output directly)
+/// STRICT ZERO-MICROPHONE POLICY:
+/// Exclusively queries `host.default_output_device()` (system speaker / headphone output WASAPI Loopback).
+/// NEVER queries or opens `default_input_device()` (microphones are 100% physically untouched).
+fn select_output_only_loopback_device(
+    host: &cpal::Host,
+) -> Option<(Device, SupportedStreamConfig, String)> {
     if let Some(out_dev) = host.default_output_device() {
         if let Ok(cfg) = out_dev.default_output_config() {
-            let name = out_dev.name().unwrap_or_else(|_| "Default Output Loopback".to_string());
+            let name = out_dev
+                .name()
+                .unwrap_or_else(|_| "System Output Loopback".to_string());
             return Some((out_dev, cfg, name));
-        }
-    }
-    // Priority 2: System Default Input Device (Stereo Mix / Loopback fallback)
-    if let Some(in_dev) = host.default_input_device() {
-        if let Ok(cfg) = in_dev.default_input_config() {
-            let name = in_dev.name().unwrap_or_else(|_| "Default Audio Input".to_string());
-            return Some((in_dev, cfg, name));
         }
     }
     None
 }
 
-/// Spawns a persistent background Rust watchdog thread that automatically binds to the default
-/// sound card output loopback (WASAPI Loopback on Windows) and seamlessly reconnects whenever
-/// headphones/speakers are plugged in, unplugged, or switched.
+/// Spawns a persistent background Rust watchdog thread that binds ONLY to the default
+/// speaker/headphone output loopback (WASAPI Loopback on Windows) and seamlessly reconnects
+/// whenever headphones/speakers are plugged in, unplugged, or switched.
 pub fn spawn_soundcard_loopback(app: AppHandle) {
     std::thread::spawn(move || {
         let state = Arc::new(Mutex::new(DspState::new()));
 
         loop {
             let host = cpal::default_host();
-            let Some((device, config, active_device_name)) = select_default_loopback_device(&host) else {
-                // No audio device available right now; retry in 2 seconds
+            let Some((device, config, active_device_name)) =
+                select_output_only_loopback_device(&host)
+            else {
+                // No speaker/headphone output device active; wait quietly without ever touching microphones
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
             };
@@ -231,7 +232,7 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
             let broken_for_err = stream_broken.clone();
 
             let err_fn = move |err| {
-                eprintln!("[AuraLine Audio Loopback] 声卡流状态变更，准备自动重连: {}", err);
+                eprintln!("[AuraLine Output Loopback] 播放设备切换，准备自动重连: {}", err);
                 broken_for_err.store(true, Ordering::SeqCst);
             };
 
@@ -254,7 +255,8 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
                 SampleFormat::I16 => device.build_input_stream(
                     &stream_config,
                     move |data: &[i16], _| {
-                        let converted: Vec<f32> = data.iter().map(|&s| s.to_float_sample()).collect();
+                        let converted: Vec<f32> =
+                            data.iter().map(|&s| s.to_float_sample()).collect();
                         push_and_emit(
                             &converted,
                             channels,
@@ -270,7 +272,8 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
                 SampleFormat::U16 => device.build_input_stream(
                     &stream_config,
                     move |data: &[u16], _| {
-                        let converted: Vec<f32> = data.iter().map(|&s| s.to_float_sample()).collect();
+                        let converted: Vec<f32> =
+                            data.iter().map(|&s| s.to_float_sample()).collect();
                         push_and_emit(
                             &converted,
                             channels,
@@ -291,7 +294,7 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
 
             if let Ok(stream) = stream_result {
                 if stream.play().is_ok() {
-                    // Watchdog loop: check every 2 seconds for stream error OR default device hot-swap
+                    // Watchdog loop: check every 2 seconds for stream error OR default output device hot-swap
                     loop {
                         std::thread::sleep(Duration::from_secs(2));
                         if stream_broken.load(Ordering::SeqCst) {
@@ -300,7 +303,6 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
                         if let Some(current_out) = host.default_output_device() {
                             if let Ok(current_name) = current_out.name() {
                                 if current_name != active_device_name {
-                                    // User switched headphones / speakers! Drop old stream and bind new device
                                     break;
                                 }
                             }
@@ -309,7 +311,6 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
                 }
             }
 
-            // Brief pause before re-initializing stream on new device
             std::thread::sleep(Duration::from_millis(400));
         }
     });

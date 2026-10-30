@@ -1,6 +1,6 @@
 {
-  "summary":  "Complete turnkey Tauri v2 + Rust native soundcard loopback integration plan: pre-installs @tauri-apps/api & @tauri-apps/cli, enables withGlobalTauri in tauri.conf.json, implements automatic audio device hot-plug reconnection in Rust, and wires native mouse click-through control so the repo works out-of-the-box with zero manual agent work needed.",
-  "updatedAt":  "2026-10-30T06:51:51.284425445Z",
+  "summary":  "Updated implementation plan with strict Zero-Microphone Policy: physically disables all microphone/input device access in both Rust (only binds default_output_device WASAPI Loopback) and Frontend (removes all getUserMedia microphone calls and permissions), plus GitHub Actions .exe build, local build-exe.bat, Windows System Tray, and window position persistence.",
+  "updatedAt":  "2026-10-30T08:35:01.583912340Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
