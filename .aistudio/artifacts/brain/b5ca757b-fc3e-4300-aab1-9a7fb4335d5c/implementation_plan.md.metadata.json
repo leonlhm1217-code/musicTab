@@ -1,0 +1,6 @@
+{
+  "summary":  "针对工作电脑场景优化的 AuraLyric Mini 方案：改用紧凑型桌面微组件（Mini Bar / Micro Widget）架构，支持浏览器原生画中画独立置顶小窗（Document PiP）、多档袖珍尺寸（如 480×84px）、一键办公隐身/微缩模式及低资源占用渲染。",
+  "updatedAt":  "2026-10-29T15:02:31.382091152Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}
