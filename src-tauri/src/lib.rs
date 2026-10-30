@@ -5,13 +5,13 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, PhysicalPosition, Position, Window,
+    AppHandle, Emitter, Manager, PhysicalPosition, Position, WebviewWindow,
 };
 
 static CLICK_THROUGH_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
-fn set_click_through(window: Window, ignore: bool) -> Result<(), String> {
+fn set_click_through(window: WebviewWindow, ignore: bool) -> Result<(), String> {
     CLICK_THROUGH_ACTIVE.store(ignore, Ordering::SeqCst);
     window
         .set_ignore_cursor_events(ignore)
@@ -19,25 +19,25 @@ fn set_click_through(window: Window, ignore: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn start_window_drag(window: Window) -> Result<(), String> {
+fn start_window_drag(window: WebviewWindow) -> Result<(), String> {
     window.start_dragging().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn get_window_position(window: Window) -> Result<(i32, i32), String> {
+fn get_window_position(window: WebviewWindow) -> Result<(i32, i32), String> {
     let pos = window.outer_position().map_err(|e| e.to_string())?;
     Ok((pos.x, pos.y))
 }
 
 #[tauri::command]
-fn set_window_position(window: Window, x: i32, y: i32) -> Result<(), String> {
+fn set_window_position(window: WebviewWindow, x: i32, y: i32) -> Result<(), String> {
     window
         .set_position(Position::Physical(PhysicalPosition { x, y }))
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn reset_window_to_bottom_center(window: Window) -> Result<(i32, i32), String> {
+fn reset_window_to_bottom_center(window: WebviewWindow) -> Result<(i32, i32), String> {
     if let Ok(Some(monitor)) = window.current_monitor() {
         let screen = monitor.size();
         let win_size = window
@@ -78,7 +78,6 @@ fn build_embedded_tray_icon() -> Image<'static> {
                     let norm_x = ((x - 5) as f32) / 21.0;
                     let line_dist = ((y as f32) - 15.5).abs();
                     if line_dist <= 1.6 {
-                        // Gradient from cyan-indigo (left) to white core (center) to violet (right)
                         let r = (110.0 + 145.0 * (1.0 - (norm_x - 0.5).abs() * 1.8).max(0.0)) as u8;
                         let g = (195.0 + 60.0 * (1.0 - norm_x)) as u8;
                         let b = 255u8;
@@ -173,6 +172,7 @@ fn setup_system_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> 
         .icon(icon)
         .tooltip("AuraLine — 隐身声学细线 (仅监听扬声器/耳机输出，零麦克风占用)")
         .menu(&menu)
+        .show_menu_on_left_click(false)
         .on_menu_event(|app_handle, event| {
             let id = event.id().as_ref();
             match id {

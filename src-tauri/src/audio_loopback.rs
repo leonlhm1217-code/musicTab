@@ -1,5 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, Sample, SampleFormat, SupportedStreamConfig};
+use cpal::{Device, SampleFormat, SupportedStreamConfig};
 use rustfft::{num_complex::Complex, FftPlanner};
 use serde::Serialize;
 use std::f32::consts::PI;
@@ -224,68 +224,87 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
             let sample_format = config.sample_format();
             let stream_config: cpal::StreamConfig = config.into();
 
-            let state_ref = state.clone();
-            let app_ref = app.clone();
-            let dev_name_for_cb = active_device_name.clone();
-
             let stream_broken = Arc::new(AtomicBool::new(false));
-            let broken_for_err = stream_broken.clone();
-
-            let err_fn = move |err| {
-                eprintln!("[AuraLine Output Loopback] 播放设备切换，准备自动重连: {}", err);
-                broken_for_err.store(true, Ordering::SeqCst);
-            };
 
             let stream_result = match sample_format {
-                SampleFormat::F32 => device.build_input_stream(
-                    &stream_config,
-                    move |data: &[f32], _| {
-                        push_and_emit(
-                            data,
-                            channels,
-                            sample_rate,
-                            &dev_name_for_cb,
-                            &state_ref,
-                            &app_ref,
-                        );
-                    },
-                    err_fn,
-                    None,
-                ),
-                SampleFormat::I16 => device.build_input_stream(
-                    &stream_config,
-                    move |data: &[i16], _| {
-                        let converted: Vec<f32> =
-                            data.iter().map(|&s| s.to_float_sample()).collect();
-                        push_and_emit(
-                            &converted,
-                            channels,
-                            sample_rate,
-                            &dev_name_for_cb,
-                            &state_ref,
-                            &app_ref,
-                        );
-                    },
-                    err_fn,
-                    None,
-                ),
-                SampleFormat::U16 => device.build_input_stream(
-                    &stream_config,
-                    move |data: &[u16], _| {
-                        let converted: Vec<f32> =
-                            data.iter().map(|&s| s.to_float_sample()).collect();
-                        push_and_emit(
-                            &converted,
-                            channels,
-                            sample_rate,
-                            &dev_name_for_cb,
-                            &state_ref,
-                            &app_ref,
-                        );
-                    },
-                    err_fn,
-                    None,
-                ),
+                SampleFormat::F32 => {
+                    let state_ref = state.clone();
+                    let app_ref = app.clone();
+                    let dev_name_for_cb = active_device_name.clone();
+                    let broken_for_err = stream_broken.clone();
+                    device.build_input_stream(
+                        &stream_config,
+                        move |data: &[f32], _| {
+                            push_and_emit(
+                                data,
+                                channels,
+                                sample_rate,
+                                &dev_name_for_cb,
+                                &state_ref,
+                                &app_ref,
+                            );
+                        },
+                        move |err| {
+                            eprintln!("[AuraLine Output Loopback] 播放设备切换，准备自动重连: {}", err);
+                            broken_for_err.store(true, Ordering::SeqCst);
+                        },
+                        None,
+                    )
+                }
+                SampleFormat::I16 => {
+                    let state_ref = state.clone();
+                    let app_ref = app.clone();
+                    let dev_name_for_cb = active_device_name.clone();
+                    let broken_for_err = stream_broken.clone();
+                    device.build_input_stream(
+                        &stream_config,
+                        move |data: &[i16], _| {
+                            let converted: Vec<f32> =
+                                data.iter().map(|&s| (s as f32) / 32768.0).collect();
+                            push_and_emit(
+                                &converted,
+                                channels,
+                                sample_rate,
+                                &dev_name_for_cb,
+                                &state_ref,
+                                &app_ref,
+                            );
+                        },
+                        move |err| {
+                            eprintln!("[AuraLine Output Loopback] 播放设备切换，准备自动重连: {}", err);
+                            broken_for_err.store(true, Ordering::SeqCst);
+                        },
+                        None,
+                    )
+                }
+                SampleFormat::U16 => {
+                    let state_ref = state.clone();
+                    let app_ref = app.clone();
+                    let dev_name_for_cb = active_device_name.clone();
+                    let broken_for_err = stream_broken.clone();
+                    device.build_input_stream(
+                        &stream_config,
+                        move |data: &[u16], _| {
+                            let converted: Vec<f32> = data
+                                .iter()
+                                .map(|&s| ((s as f32) - 32768.0) / 32768.0)
+                                .collect();
+                            push_and_emit(
+                                &converted,
+                                channels,
+                                sample_rate,
+                                &dev_name_for_cb,
+                                &state_ref,
+                                &app_ref,
+                            );
+                        },
+                        move |err| {
+                            eprintln!("[AuraLine Output Loopback] 播放设备切换，准备自动重连: {}", err);
+                            broken_for_err.store(true, Ordering::SeqCst);
+                        },
+                        None,
+                    )
+                }
                 _ => {
                     std::thread::sleep(Duration::from_secs(2));
                     continue;
