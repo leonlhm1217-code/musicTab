@@ -97,8 +97,8 @@ export const AURA_THEMES: Record<AuraThemeId, AuraThemePalette> = {
 };
 
 export const DEFAULT_SETTINGS: StealthLineSettings = {
-  lineWidth: 220,
-  lineHeight: 28,
+  lineWidth: 320,
+  lineHeight: 38,
   preferredBands: 24,
   taskbarDockMode: 'left_edge',
   taskbarOffsetX: 0,
@@ -106,7 +106,7 @@ export const DEFAULT_SETTINGS: StealthLineSettings = {
   masterOpacity: 1.0,
   theme: 'minimal_white',
   elasticIntensity: 1.15,
-  auraSensitivity: 1.15,
+  auraSensitivity: 1.25,
   workLowPower30Fps: false,
   lightCanvasBg: false,
   autoSleepEnabled: true,

@@ -30,8 +30,8 @@ impl Default for TaskbarAdaptiveConfig {
         Self {
             dock_mode: "left_edge".to_string(),
             offset_x: 0,
-            desired_width: 220,
-            desired_height: 30,
+            desired_width: 320,
+            desired_height: 38,
             preferred_bands: 24,
         }
     }
@@ -144,7 +144,7 @@ mod win32_taskbar {
 
             let tray_w = tray_rect.right - tray_rect.left;
             let tray_h = tray_rect.bottom - tray_rect.top;
-            if tray_w < 400 || tray_h < 24 || tray_h > 120 {
+            if tray_w < 400 || tray_h < 24 || tray_h > 160 {
                 return None;
             }
 
@@ -172,11 +172,11 @@ mod win32_taskbar {
                 }
             }
 
-            let strip_w = (safe_tray_left - tray_rect.left).clamp(200, 3840);
+            let strip_w = (safe_tray_left - tray_rect.left).clamp(200, 5120);
             let strip_h = 5;
             let sample_y = tray_rect.top + (tray_h / 2) - 2;
 
-            let default_centered_left = tray_rect.left + (tray_w / 3).max(320);
+            let default_centered_left = tray_rect.left + (tray_w * 35 / 100).max(420);
 
             let screen_dc = GetDC(0);
             if screen_dc == 0 {
@@ -241,14 +241,14 @@ mod win32_taskbar {
                     let mut bg_cnt = 0i32;
 
                     let sample_ranges = [
-                        (145.min(strip_w), 210.min(strip_w)),
-                        ((strip_w - 70).max(0), strip_w),
+                        (180.min(strip_w), 260.min(strip_w)),
+                        ((strip_w - 90).max(0), strip_w),
                     ];
 
                     for (r_start, r_end) in sample_ranges {
                         for rel_x in r_start..r_end {
                             let abs_x = tray_rect.left + rel_x;
-                            if abs_x >= our_win_left - 14 && abs_x <= our_win_right + 14 {
+                            if abs_x >= our_win_left - 18 && abs_x <= our_win_right + 18 {
                                 continue;
                             }
                             let idx = ((2 * strip_w + rel_x) * 4) as usize;
@@ -265,15 +265,15 @@ mod win32_taskbar {
                         let bg_b = bg_b_sum / bg_cnt;
 
                         // A. Scan from past the far-left corner/widget zone toward the center
-                        // to find the true left boundary of the centered Start button / Search bar
+                        // Use a high-contrast threshold (78) so Windows 11 Mica wallpaper gradients never false-trigger
                         let mut left_hits = 0;
                         let mut found_left = None;
-                        let scan_left_start = 140.min(strip_w / 3);
+                        let scan_left_start = (tray_w * 22 / 100).max(260).min(strip_w / 2);
                         let scan_left_end = (strip_w * 2 / 3).min(strip_w - 20);
 
                         for rel_x in scan_left_start..scan_left_end {
                             let abs_x = tray_rect.left + rel_x;
-                            if abs_x >= our_win_left - 14 && abs_x <= our_win_right + 14 {
+                            if abs_x >= our_win_left - 18 && abs_x <= our_win_right + 18 {
                                 left_hits = 0;
                                 continue;
                             }
@@ -290,10 +290,10 @@ mod win32_taskbar {
                                 }
                             }
 
-                            if col_diff_max > 28 {
+                            if col_diff_max > 78 {
                                 left_hits += 1;
-                                if left_hits >= 5 {
-                                    found_left = Some(abs_x - 5);
+                                if left_hits >= 8 {
+                                    found_left = Some(abs_x - 8);
                                     break;
                                 }
                             } else {
@@ -309,9 +309,9 @@ mod win32_taskbar {
                         let mut right_hits = 0;
                         let mut found_right = None;
 
-                        for rel_x in (80..(strip_w - 8)).rev() {
+                        for rel_x in (120..(strip_w - 8)).rev() {
                             let abs_x = tray_rect.left + rel_x;
-                            if abs_x >= our_win_left - 14 && abs_x <= our_win_right + 14 {
+                            if abs_x >= our_win_left - 18 && abs_x <= our_win_right + 18 {
                                 right_hits = 0;
                                 continue;
                             }
@@ -328,10 +328,10 @@ mod win32_taskbar {
                                 }
                             }
 
-                            if col_diff_max > 28 {
+                            if col_diff_max > 72 {
                                 right_hits += 1;
-                                if right_hits >= 4 {
-                                    found_right = Some(abs_x + 4);
+                                if right_hits >= 6 {
+                                    found_right = Some(abs_x + 6);
                                     break;
                                 }
                             } else {
@@ -369,6 +369,7 @@ pub fn spawn_taskbar_adaptive_watcher(
         let mut last_applied_x = -99999i32;
         let mut last_applied_y = -99999i32;
         let mut last_applied_w = -99999i32;
+        let mut last_applied_h = -99999i32;
         let mut is_first_pass = true;
 
         loop {
@@ -391,87 +392,99 @@ pub fn spawn_taskbar_adaptive_watcher(
             #[cfg(target_os = "windows")]
             {
                 if let Some(main_win) = app.get_webview_window("main") {
+                    let scale = main_win.scale_factor().unwrap_or(1.0).max(1.0);
                     let cur_pos = main_win
                         .outer_position()
                         .unwrap_or(PhysicalPosition { x: -1000, y: -1000 });
                     let cur_size = main_win
                         .outer_size()
-                        .unwrap_or(PhysicalSize { width: 220, height: 36 });
+                        .unwrap_or(PhysicalSize { width: 360, height: 44 });
 
                     let our_left = cur_pos.x;
                     let our_right = cur_pos.x + (cur_size.width as i32);
 
                     if let Some(scan) = win32_taskbar::scan_taskbar_empty_slot(our_left, our_right) {
-                        let tray_h = (scan.tray_rect.bottom - scan.tray_rect.top).max(32);
-                        let button_margin = 52; // Reserve space for hover settings/close icons
-                        let max_total_w = cfg.desired_width + button_margin;
+                        let tray_h_phys = (scan.tray_rect.bottom - scan.tray_rect.top).max(36);
+                        let button_margin_phys = (16.0 * scale).round() as i32;
+                        let desired_w_phys = ((cfg.desired_width as f64) * scale).round() as i32;
+                        let max_total_w_phys = desired_w_phys + button_margin_phys;
+                        let min_total_w_phys = (160.0 * scale).round() as i32;
+                        let offset_x_phys = ((cfg.offset_x as f64) * scale).round() as i32;
 
-                        let (target_x, available_width) = if cfg.dock_mode == "left_edge" {
+                        let (target_x_phys, avail_w_phys) = if cfg.dock_mode == "left_edge" {
                             // Stick closely to the far-left edge of the taskbar, avoiding the centered Start/Search bar
-                            let left_x = (scan.tray_rect.left + 8 + cfg.offset_x).max(scan.tray_rect.left + 2);
-                            let avail = (scan.centered_left_x - 10 - left_x).max(110);
+                            let left_x = (scan.tray_rect.left + (8.0 * scale).round() as i32 + offset_x_phys)
+                                .max(scan.tray_rect.left + 2);
+                            let avail = (scan.centered_left_x - (10.0 * scale).round() as i32 - left_x)
+                                .max(min_total_w_phys);
                             (left_x, avail)
                         } else if cfg.dock_mode == "before_tray" {
-                            let slot_left = scan.icons_right_x + 14;
-                            let slot_right = scan.notify_left_x - 8;
-                            let avail = (slot_right - slot_left).max(110);
-                            let win_w = avail.min(max_total_w).max(110);
-                            let rx = (slot_right - win_w + cfg.offset_x).clamp(scan.tray_rect.left + 8, slot_right - 80);
+                            let slot_left = scan.icons_right_x + (14.0 * scale).round() as i32;
+                            let slot_right = scan.notify_left_x - (8.0 * scale).round() as i32;
+                            let avail = (slot_right - slot_left).max(min_total_w_phys);
+                            let win_w = avail.min(max_total_w_phys).max(min_total_w_phys);
+                            let rx = (slot_right - win_w + offset_x_phys)
+                                .clamp(scan.tray_rect.left + 8, (slot_right - min_total_w_phys).max(scan.tray_rect.left + 8));
                             (rx, avail)
                         } else {
                             // "after_icons": Immediately to the right of the last taskbar icon / search box
-                            let slot_left = scan.icons_right_x + 14;
-                            let slot_right = scan.notify_left_x - 8;
-                            let avail = (slot_right - slot_left).max(110);
-                            let rx = (slot_left + cfg.offset_x).clamp(scan.tray_rect.left + 8, slot_right - 80);
+                            let slot_left = scan.icons_right_x + (14.0 * scale).round() as i32;
+                            let slot_right = scan.notify_left_x - (8.0 * scale).round() as i32;
+                            let avail = (slot_right - slot_left).max(min_total_w_phys);
+                            let rx = (slot_left + offset_x_phys)
+                                .clamp(scan.tray_rect.left + 8, (slot_right - min_total_w_phys).max(scan.tray_rect.left + 8));
                             (rx, avail)
                         };
 
-                        let target_win_w = available_width.min(max_total_w).max(110);
-                        let inner_bar_w = (target_win_w - button_margin).max(64);
+                        let target_win_w_phys = avail_w_phys.min(max_total_w_phys).max(min_total_w_phys);
+                        let inner_bar_w_phys = (target_win_w_phys - button_margin_phys).max((140.0 * scale).round() as i32);
+                        let inner_bar_w_logical = ((inner_bar_w_phys as f64) / scale).round() as i32;
+                        let tray_h_logical = ((tray_h_phys as f64) / scale).round() as i32;
 
-                        // Dynamically adapt frequency band count if centered icons/search box expand close to the left edge
-                        let recommended_bands = if inner_bar_w >= 190 {
+                        // Dynamically adapt frequency band count based on logical pixel width
+                        let recommended_bands = if inner_bar_w_logical >= 200 {
                             cfg.preferred_bands.min(32)
-                        } else if inner_bar_w >= 140 {
+                        } else if inner_bar_w_logical >= 150 {
                             cfg.preferred_bands.min(24)
-                        } else if inner_bar_w >= 96 {
-                            16
                         } else {
-                            12
+                            16
                         };
 
-                        let target_win_h = tray_h.min(44).max(28);
-                        let target_y = scan.tray_rect.top + (tray_h - target_win_h) / 2;
+                        // Match full physical height of the Windows taskbar (respecting High-DPI scaling)
+                        let target_win_h_phys = (tray_h_phys - (2.0 * scale).round() as i32)
+                            .max((36.0 * scale).round() as i32);
+                        let target_y_phys = scan.tray_rect.top + (tray_h_phys - target_win_h_phys) / 2;
 
-                        if (target_x - last_applied_x).abs() > 2
-                            || (target_y - last_applied_y).abs() > 1
-                            || (target_win_w - last_applied_w).abs() > 4
+                        if (target_x_phys - last_applied_x).abs() > 2
+                            || (target_y_phys - last_applied_y).abs() > 1
+                            || (target_win_w_phys - last_applied_w).abs() > 4
+                            || (target_win_h_phys - last_applied_h).abs() > 2
                         {
                             let _ = main_win.set_size(Size::Physical(PhysicalSize {
-                                width: target_win_w as u32,
-                                height: target_win_h as u32,
+                                width: target_win_w_phys as u32,
+                                height: target_win_h_phys as u32,
                             }));
                             let _ = main_win.set_position(Position::Physical(PhysicalPosition {
-                                x: target_x,
-                                y: target_y,
+                                x: target_x_phys,
+                                y: target_y_phys,
                             }));
                             let _ = main_win.set_always_on_top(true);
 
-                            last_applied_x = target_x;
-                            last_applied_y = target_y;
-                            last_applied_w = target_win_w;
+                            last_applied_x = target_x_phys;
+                            last_applied_y = target_y_phys;
+                            last_applied_w = target_win_w_phys;
+                            last_applied_h = target_win_h_phys;
                         }
 
                         let payload = TaskbarSlotPayload {
-                            x: target_x,
-                            y: target_y,
-                            available_width: inner_bar_w,
-                            taskbar_height: tray_h,
+                            x: target_x_phys,
+                            y: target_y_phys,
+                            available_width: inner_bar_w_logical,
+                            taskbar_height: tray_h_logical,
                             recommended_bands,
-                            centered_left_x: scan.centered_left_x,
-                            icons_right_x: scan.icons_right_x,
-                            tray_left_x: scan.notify_left_x,
+                            centered_left_x: ((scan.centered_left_x as f64) / scale).round() as i32,
+                            icons_right_x: ((scan.icons_right_x as f64) / scale).round() as i32,
+                            tray_left_x: ((scan.notify_left_x as f64) / scale).round() as i32,
                         };
                         let _ = app.emit("taskbar-slot-updated", payload);
                     }

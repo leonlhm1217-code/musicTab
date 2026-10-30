@@ -18,9 +18,9 @@
   html,
   body,
   #root {
+    min-height: 100vh;
     font-family: var(--font-sans);
-    background: transparent !important;
-    background-color: transparent !important;
+    background-color: transparent;
     color: #F4F4F6;
     margin: 0;
     padding: 0;

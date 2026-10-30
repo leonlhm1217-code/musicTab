@@ -39,8 +39,8 @@ export const MiniAuraWidget: React.FC<MiniAuraWidgetProps> = ({
     8,
     Math.min(32, activeBands ?? settings.preferredBands ?? 24)
   );
-  const width = Math.max(84, Math.round(effectiveWidth ?? settings.lineWidth ?? 220));
-  const vfdHeight = Math.max(16, Math.min(36, Math.round(settings.lineHeight ?? 28)));
+  const width = Math.max(100, Math.round(effectiveWidth ?? settings.lineWidth ?? 320));
+  const vfdHeight = Math.max(22, Math.min(54, Math.round(settings.lineHeight ?? 38)));
   const palette = AURA_THEMES[settings.theme] ?? AURA_THEMES.minimal_white;
 
   useEffect(() => {
@@ -53,17 +53,17 @@ export const MiniAuraWidget: React.FC<MiniAuraWidgetProps> = ({
     canvas.width = width * dpr;
     canvas.height = vfdHeight * dpr;
 
-    // VFD cell vertical geometry: 2px LED cell height + 1px dark horizontal separator
-    const segHeight = 2;
+    // VFD cell vertical geometry: scales to 3px LED cell height when vfdHeight >= 34px for bold desktop visibility
+    const segHeight = vfdHeight >= 34 ? 3 : 2;
     const segGap = 1;
     const stepY = segHeight + segGap;
-    const totalSegments = Math.max(5, Math.floor((vfdHeight - 2) / stepY));
+    const totalSegments = Math.max(6, Math.floor((vfdHeight - 2) / stepY));
     const bottomBaselineY = vfdHeight - 1;
 
     // Horizontal column geometry (pixel-snapped for razor-sharp VFD segments)
-    const colGap = bandCount >= 28 ? 1.5 : 2;
+    const colGap = bandCount >= 28 ? 2 : 2.5;
     const rawColWidth = (width - (bandCount - 1) * colGap) / bandCount;
-    const colWidth = Math.max(2, Math.floor(rawColWidth));
+    const colWidth = Math.max(3, Math.floor(rawColWidth));
     const totalUsedWidth = bandCount * colWidth + (bandCount - 1) * colGap;
     const startOffsetX = Math.max(0, Math.floor((width - totalUsedWidth) * 0.5));
 

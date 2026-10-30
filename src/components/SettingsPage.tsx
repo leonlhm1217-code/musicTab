@@ -16,6 +16,7 @@ import {
   Rocket,
   RotateCcw,
   Unlock,
+  X,
 } from 'lucide-react';
 
 interface SettingsPageProps {
@@ -30,7 +31,7 @@ interface SettingsPageProps {
   onToggleClickThrough: (nextIgnore: boolean) => void;
   onToggleAutoStart: (nextEnabled: boolean) => void;
   onResetPosition: () => void;
-  onBackToBar?: () => void;
+  onCloseSettings: () => void;
   onQuitApp: () => void;
 }
 
@@ -59,9 +60,19 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   onToggleClickThrough,
   onToggleAutoStart,
   onResetPosition,
-  onBackToBar,
+  onCloseSettings,
   onQuitApp,
 }) => {
+  React.useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onCloseSettings();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onCloseSettings]);
+
   const dockOptions: {
     id: TaskbarDockMode;
     shortLabel: string;
@@ -97,17 +108,17 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   const offsetPx = settings.taskbarOffsetX ?? 0;
 
   return (
-    <div className="anodized-chassis min-h-screen w-full text-[#F4F4F6] flex flex-col justify-between px-5 py-4 select-none overflow-y-auto">
-      <div className="max-w-md w-full mx-auto">
+    <div className="anodized-chassis min-h-screen w-full bg-[#09090B] text-[#F4F4F6] flex flex-col justify-between px-5 py-4 select-none overflow-y-auto">
+      <div className="max-w-md w-full mx-auto pb-4">
         {/* Top Hardware Instrument Header */}
-        <header className="flex items-center justify-between border-b border-white/[0.08] pb-3">
+        <header className="flex items-center justify-between border-b border-white/[0.08] pb-3 gap-2">
           <div className="flex items-center gap-2.5 min-w-0">
-            {!isStandaloneWindow && onBackToBar && (
+            {!isStandaloneWindow && (
               <button
                 type="button"
-                onClick={onBackToBar}
+                onClick={onCloseSettings}
                 className="p-1.5 rounded bg-[#121217] hover:bg-[#1A1A22] border border-white/[0.08] text-zinc-300 transition-colors cursor-pointer shrink-0"
-                title="返回任务栏车载频谱视图"
+                title="返回任务栏车载频谱视图 (Esc)"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
               </button>
@@ -127,15 +138,27 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={onQuitApp}
-            className="px-2.5 py-1.5 rounded bg-red-950/30 hover:bg-red-900/40 border border-red-500/25 text-red-300 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-            title="彻底关闭并退出 AuraLine"
-          >
-            <Power className="w-3.5 h-3.5 shrink-0" />
-            <span>退出</span>
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={onCloseSettings}
+              className="px-2.5 py-1.5 rounded bg-[#16161D] hover:bg-[#22222C] border border-[#D4AF37]/40 text-[#F4F4F6] text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              title="保存并关闭设置窗口 (快捷键 Esc)，保持任务栏频谱继续运行"
+            >
+              <X className="w-3.5 h-3.5 text-[#E5C158] shrink-0" />
+              <span>完成关闭</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onQuitApp}
+              className="px-2.5 py-1.5 rounded bg-red-950/30 hover:bg-red-900/40 border border-red-500/25 text-red-300 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              title="彻底退出 AuraLine 后台进程"
+            >
+              <Power className="w-3.5 h-3.5 shrink-0" />
+              <span>退出</span>
+            </button>
+          </div>
         </header>
 
         {/* Focal Anchor: Recessed Smoked-Glass VFD Spectrum Bay */}
@@ -411,12 +434,46 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                   04.
                 </span>
                 <h2 className="text-xs font-medium text-zinc-200">
-                  几何尺寸与增益推子
+                  任务栏比例尺寸与增益推子
                 </h2>
               </div>
               <span className="text-[10px] text-zinc-500">
                 双击推子恢复出厂值
               </span>
+            </div>
+
+            {/* Quick Taskbar Scale Presets */}
+            <div className="grid grid-cols-3 gap-1 p-1 rounded bg-[#0E0E12] border border-white/[0.06]">
+              {(
+                [
+                  { label: '紧凑比例 (240×32)', w: 240, h: 32 },
+                  { label: '标准比例 (320×38)', w: 320, h: 38 },
+                  { label: '加宽放大 (440×46)', w: 440, h: 46 },
+                ] as const
+              ).map((preset) => {
+                const isCurrent =
+                  Math.abs((settings.lineWidth ?? 320) - preset.w) <= 10 &&
+                  Math.abs((settings.lineHeight ?? 38) - preset.h) <= 2;
+                return (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() =>
+                      onUpdateSettings({
+                        lineWidth: preset.w,
+                        lineHeight: preset.h,
+                      })
+                    }
+                    className={`py-1 px-2 rounded-[3px] text-[11px] font-medium transition-all cursor-pointer whitespace-nowrap shrink-0 text-center ${
+                      isCurrent
+                        ? 'bg-[#1C1C22] text-[#E5C158] border border-[#D4AF37]/50'
+                        : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
             </div>
 
             <div className="space-y-2 text-xs">
@@ -457,10 +514,10 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                 <div className="flex items-center gap-2.5">
                   <input
                     type="range"
-                    min="120"
-                    max="360"
+                    min="160"
+                    max="600"
                     step="10"
-                    value={settings.lineWidth}
+                    value={settings.lineWidth ?? 320}
                     onDoubleClick={() =>
                       onUpdateSettings({ lineWidth: DEFAULT_SETTINGS.lineWidth })
                     }
@@ -473,7 +530,9 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                     className="hardware-fader w-36"
                   />
                   <span className="font-mono-tabular w-14 text-right">
-                    <span className="text-zinc-100">{settings.lineWidth}</span>
+                    <span className="text-zinc-100">
+                      {settings.lineWidth ?? 320}
+                    </span>
                     <span className="text-[10px] text-zinc-500 ml-0.5">px</span>
                   </span>
                 </div>
@@ -484,10 +543,10 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                 <div className="flex items-center gap-2.5">
                   <input
                     type="range"
-                    min="18"
-                    max="36"
+                    min="24"
+                    max="54"
                     step="2"
-                    value={settings.lineHeight}
+                    value={settings.lineHeight ?? 38}
                     onDoubleClick={() =>
                       onUpdateSettings({
                         lineHeight: DEFAULT_SETTINGS.lineHeight,
@@ -502,7 +561,9 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                     className="hardware-fader w-36"
                   />
                   <span className="font-mono-tabular w-14 text-right">
-                    <span className="text-zinc-100">{settings.lineHeight}</span>
+                    <span className="text-zinc-100">
+                      {settings.lineHeight ?? 38}
+                    </span>
                     <span className="text-[10px] text-zinc-500 ml-0.5">px</span>
                   </span>
                 </div>
@@ -514,9 +575,9 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                   <input
                     type="range"
                     min="0.6"
-                    max="1.8"
+                    max="2.2"
                     step="0.05"
-                    value={settings.auraSensitivity}
+                    value={settings.auraSensitivity ?? 1.25}
                     onDoubleClick={() =>
                       onUpdateSettings({
                         auraSensitivity: DEFAULT_SETTINGS.auraSensitivity,
@@ -532,7 +593,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                   />
                   <span className="font-mono-tabular w-14 text-right">
                     <span className="text-zinc-100">
-                      {settings.auraSensitivity.toFixed(2)}
+                      {(settings.auraSensitivity ?? 1.25).toFixed(2)}
                     </span>
                     <span className="text-[10px] text-zinc-500 ml-0.5">×</span>
                   </span>

@@ -79,6 +79,24 @@ export class RealtimeAudioEngine {
     return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__);
   }
 
+  public isSettingsWindow(): boolean {
+    if (typeof window === 'undefined') return false;
+    const winAny = window as unknown as { __AURALINE_WINDOW_LABEL__?: string };
+    if (winAny.__AURALINE_WINDOW_LABEL__ === 'settings') {
+      return true;
+    }
+    if (this.isRunningInTauri()) {
+      try {
+        if (getCurrentWindow().label === 'settings') {
+          return true;
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return window.location.hash === '#settings' || window.location.search.includes('settings');
+  }
+
   public async getAutoStartEnabled(): Promise<boolean> {
     if (!this.isRunningInTauri()) {
       return localStorage.getItem(AUTO_START_FALLBACK_KEY) === 'true';
@@ -113,6 +131,21 @@ export class RealtimeAudioEngine {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  public async closeNativeSettingsWindow(): Promise<boolean> {
+    if (!this.isRunningInTauri()) return false;
+    try {
+      await invoke('close_settings_window');
+      return true;
+    } catch {
+      try {
+        await getCurrentWindow().hide();
+        return true;
+      } catch {
+        return false;
+      }
     }
   }
 

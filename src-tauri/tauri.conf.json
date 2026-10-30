@@ -16,10 +16,10 @@
       {
         "label": "main",
         "title": "AuraLine",
-        "width": 280,
-        "height": 38,
-        "minWidth": 96,
-        "minHeight": 24,
+        "width": 360,
+        "height": 44,
+        "minWidth": 120,
+        "minHeight": 28,
         "decorations": false,
         "transparent": true,
         "shadow": false,
@@ -27,6 +27,20 @@
         "skipTaskbar": true,
         "resizable": false,
         "center": false
+      },
+      {
+        "label": "settings",
+        "title": "AuraLine — 任务栏车载频谱设置",
+        "url": "index.html#settings",
+        "width": 500,
+        "height": 700,
+        "minWidth": 440,
+        "minHeight": 540,
+        "visible": false,
+        "decorations": true,
+        "transparent": false,
+        "resizable": true,
+        "center": true
       }
     ],
     "security": {

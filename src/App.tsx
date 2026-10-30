@@ -31,8 +31,8 @@ import {
   X,
 } from 'lucide-react';
 
-const STORAGE_KEY = 'auraline_vfd_taskbar_settings_v3';
-const WEB_DRAG_STORAGE_KEY = 'auraline_web_drag_offset_v3';
+const STORAGE_KEY = 'auraline_vfd_taskbar_settings_v4';
+const WEB_DRAG_STORAGE_KEY = 'auraline_web_drag_offset_v4';
 
 function loadSavedSettings(): StealthLineSettings {
   try {
@@ -83,9 +83,14 @@ export default function App() {
     isSleeping: false,
   });
 
-  const [isSettingsRoute, setIsSettingsRoute] = useState<boolean>(
-    () => typeof window !== 'undefined' && window.location.hash === '#settings'
-  );
+  const [isSettingsRoute, setIsSettingsRoute] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return (
+      (engineRef.current?.isSettingsWindow() ?? false) ||
+      window.location.hash.includes('settings') ||
+      window.location.search.includes('settings')
+    );
+  });
   const [settings, setSettings] = useState<StealthLineSettings>(loadSavedSettings);
   const [taskbarSlot, setTaskbarSlot] = useState<TaskbarSlotTelemetry | null>(null);
   const [clickThroughLocked, setClickThroughLocked] = useState<boolean>(false);
@@ -109,13 +114,23 @@ export default function App() {
 
   const [isSleepingState, setIsSleepingState] = useState<boolean>(false);
 
-  // Sync hash route changes (#settings vs main taskbar spectrum window)
+  // Sync hash route changes (#settings vs main taskbar spectrum window) & body background
   useEffect(() => {
-    const onHashChange = () => {
-      setIsSettingsRoute(window.location.hash === '#settings');
+    const syncRoute = () => {
+      const nextIsSettings =
+        (engineRef.current?.isSettingsWindow() ?? false) ||
+        window.location.hash.includes('settings') ||
+        window.location.search.includes('settings');
+      setIsSettingsRoute(nextIsSettings);
+      document.body.style.backgroundColor = nextIsSettings ? '#09090B' : 'transparent';
     };
-    window.addEventListener('hashchange', onHashChange);
-    return () => window.removeEventListener('hashchange', onHashChange);
+    syncRoute();
+    window.addEventListener('hashchange', syncRoute);
+    window.addEventListener('popstate', syncRoute);
+    return () => {
+      window.removeEventListener('hashchange', syncRoute);
+      window.removeEventListener('popstate', syncRoute);
+    };
   }, []);
 
   // Cross-window real-time settings synchronization + Win32 Taskbar Slot sensor subscription
@@ -202,6 +217,14 @@ export default function App() {
     }
   }, []);
 
+  const handleCloseSettings = useCallback(async () => {
+    const closedNative = await engineRef.current?.closeNativeSettingsWindow();
+    if (!closedNative) {
+      window.location.hash = '';
+      setIsSettingsRoute(false);
+    }
+  }, []);
+
   const handleQuitApp = useCallback(async () => {
     if (engineRef.current?.isRunningInTauri()) {
       await engineRef.current.quitNativeApp();
@@ -238,7 +261,7 @@ export default function App() {
     engine.startAutoConnect();
     engine.getAutoStartEnabled().then(setAutoStartEnabled);
 
-    if (window.location.hash !== '#settings') {
+    if (!engine.isSettingsWindow()) {
       const saved = loadSavedSettings();
       engine.initWindowPositionMemory(saved.taskbarDockMode ?? 'left_edge');
       engine.syncSettingsAcrossWindows(saved);
@@ -371,24 +394,23 @@ export default function App() {
   // 1. STANDALONE SETTINGS PAGE / WINDOW (#settings)
   if (isSettingsRoute) {
     return (
-      <SettingsPage
-        settings={settings}
-        telemetryRef={telemetryRef}
-        taskbarSlot={taskbarSlot}
-        isSleepingState={isSleepingState}
-        clickThroughLocked={clickThroughLocked}
-        autoStartEnabled={autoStartEnabled}
-        isStandaloneWindow={isTauri}
-        onUpdateSettings={updateSettings}
-        onToggleClickThrough={toggleClickThrough}
-        onToggleAutoStart={handleToggleAutoStart}
-        onResetPosition={handleResetPosition}
-        onBackToBar={() => {
-          window.location.hash = '';
-          setIsSettingsRoute(false);
-        }}
-        onQuitApp={handleQuitApp}
-      />
+      <div className="h-screen w-full overflow-y-auto">
+        <SettingsPage
+          settings={settings}
+          telemetryRef={telemetryRef}
+          taskbarSlot={taskbarSlot}
+          isSleepingState={isSleepingState}
+          clickThroughLocked={clickThroughLocked}
+          autoStartEnabled={autoStartEnabled}
+          isStandaloneWindow={isTauri}
+          onUpdateSettings={updateSettings}
+          onToggleClickThrough={toggleClickThrough}
+          onToggleAutoStart={handleToggleAutoStart}
+          onResetPosition={handleResetPosition}
+          onCloseSettings={handleCloseSettings}
+          onQuitApp={handleQuitApp}
+        />
+      </div>
     );
   }
 
@@ -410,7 +432,7 @@ export default function App() {
   // Compute adaptive bar count & width:
   // When centered taskbar icons expand outward as more apps open, left space shrinks if > 6 icons
   const simCrowdedFactor = Math.max(0, simAppCount - 6);
-  const simMaxWidth = Math.max(108, settings.lineWidth - simCrowdedFactor * 28);
+  const simMaxWidth = Math.max(140, settings.lineWidth - simCrowdedFactor * 28);
   const effectiveWidth = isTauri
     ? taskbarSlot
       ? Math.min(settings.lineWidth, taskbarSlot.availableWidth)
@@ -421,9 +443,7 @@ export default function App() {
     ? taskbarSlot
       ? Math.min(settings.preferredBands, taskbarSlot.recommendedBands)
       : settings.preferredBands
-    : effectiveWidth < 125
-    ? 12
-    : effectiveWidth < 165
+    : effectiveWidth < 150
     ? 16
     : effectiveWidth < 210
     ? Math.min(settings.preferredBands, 24)
@@ -459,7 +479,7 @@ export default function App() {
           ? '车载 VFD 频谱 · 手动自由拖拽模式 · 左键拖动位置 · 滚轮调透明度 · 双击打开设置'
           : '车载 VFD 频谱 · 已锁定在任务栏自动停靠槽位 · 滚轮调透明度 · 双击打开设置'
       }
-      className={`group relative flex items-center gap-1.5 px-1.5 py-0.5 transition-all duration-200 ${
+      className={`group relative flex items-center px-1 py-0.5 transition-all duration-200 ${
         clickThroughLocked
           ? 'pointer-events-none'
           : isManualDock
@@ -482,24 +502,24 @@ export default function App() {
 
       {/* Ephemeral Mouse Wheel Opacity Indicator */}
       {wheelOpacityHint !== null && (
-        <span className="text-[10px] font-mono-tabular text-white/80 drop-shadow-[0_0_6px_rgba(255,255,255,0.5)]">
+        <span className="ml-1.5 text-[10px] font-mono-tabular text-white/80 drop-shadow-[0_0_6px_rgba(255,255,255,0.5)]">
           {wheelOpacityHint}%
         </span>
       )}
 
-      {/* Subtle Hover Actions: Borderless & Background-Free with Soft White Glow */}
+      {/* Subtle Hover Actions: Floating overlay badge on the right edge so it never shrinks the spectrum bar width */}
       {!clickThroughLocked && (
-        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all duration-200 drop-shadow-[0_0_6px_rgba(255,255,255,0.35)]">
+        <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#09090B]/90 border border-white/15 opacity-0 group-hover:opacity-100 transition-all duration-150 shadow-lg">
           <button
             type="button"
             onClick={(e) => {
               e.stopPropagation();
               handleOpenSettings();
             }}
-            title="打开独立设置页面 (或双击频谱柱)"
-            className="p-0.5 text-white/45 hover:text-white/95 hover:drop-shadow-[0_0_8px_rgba(255,255,255,0.75)] transition-all duration-150 cursor-pointer"
+            title="打开设置面板 (或直接双击频谱柱)"
+            className="p-0.5 text-zinc-300 hover:text-[#E5C158] transition-colors cursor-pointer"
           >
-            <Settings className="w-3 h-3" />
+            <Settings className="w-3.5 h-3.5" />
           </button>
 
           <button
@@ -509,9 +529,9 @@ export default function App() {
               handleQuitApp();
             }}
             title="关闭并退出 AuraLine"
-            className="p-0.5 text-white/45 hover:text-white/95 hover:drop-shadow-[0_0_8px_rgba(255,255,255,0.75)] transition-all duration-150 cursor-pointer"
+            className="p-0.5 text-zinc-300 hover:text-red-400 transition-colors cursor-pointer"
           >
-            <X className="w-3 h-3" />
+            <X className="w-3.5 h-3.5" />
           </button>
         </div>
       )}
@@ -522,7 +542,7 @@ export default function App() {
   if (isTauri) {
     return (
       <div
-        className="min-h-screen w-full flex items-center justify-center bg-transparent select-none overflow-hidden"
+        className="h-screen w-full flex items-center justify-start bg-transparent select-none overflow-hidden"
         style={{ background: 'transparent' }}
       >
         {SpectrumWidgetNode}

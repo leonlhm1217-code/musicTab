@@ -141,36 +141,48 @@ fn update_taskbar_config(
 }
 
 #[tauri::command]
-fn set_click_through(window: WebviewWindow, ignore: bool) -> Result<(), String> {
+fn set_click_through(app: AppHandle, ignore: bool) -> Result<(), String> {
     CLICK_THROUGH_ACTIVE.store(ignore, Ordering::SeqCst);
-    window
-        .set_ignore_cursor_events(ignore)
-        .map_err(|e| e.to_string())
+    if let Some(main_win) = app.get_webview_window("main") {
+        main_win
+            .set_ignore_cursor_events(ignore)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
-fn start_window_drag(window: WebviewWindow) -> Result<(), String> {
-    window.start_dragging().map_err(|e| e.to_string())
+fn start_window_drag(app: AppHandle) -> Result<(), String> {
+    if let Some(main_win) = app.get_webview_window("main") {
+        main_win.start_dragging().map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
-fn get_window_position(window: WebviewWindow) -> Result<(i32, i32), String> {
-    let pos = window.outer_position().map_err(|e| e.to_string())?;
-    Ok((pos.x, pos.y))
+fn get_window_position(app: AppHandle) -> Result<(i32, i32), String> {
+    if let Some(main_win) = app.get_webview_window("main") {
+        let pos = main_win.outer_position().map_err(|e| e.to_string())?;
+        return Ok((pos.x, pos.y));
+    }
+    Ok((8, 1040))
 }
 
 #[tauri::command]
-fn set_window_position(window: WebviewWindow, x: i32, y: i32) -> Result<(), String> {
-    window
-        .set_position(Position::Physical(PhysicalPosition { x, y }))
-        .map_err(|e| e.to_string())
+fn set_window_position(app: AppHandle, x: i32, y: i32) -> Result<(), String> {
+    if let Some(main_win) = app.get_webview_window("main") {
+        main_win
+            .set_position(Position::Physical(PhysicalPosition { x, y }))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 fn resize_main_bar_window(app: AppHandle, line_width: f64, line_height: f64) -> Result<(), String> {
     if let Some(main_win) = app.get_webview_window("main") {
-        let target_w = (line_width + 58.0).max(120.0);
-        let target_h = (line_height + 12.0).max(32.0);
+        let target_w = (line_width + 36.0).max(160.0);
+        let target_h = (line_height + 8.0).max(36.0);
         let _ = main_win.set_size(Size::Logical(LogicalSize {
             width: target_w,
             height: target_h,
@@ -186,8 +198,16 @@ fn broadcast_settings(app: AppHandle, settings_json: String) -> Result<(), Strin
 }
 
 #[tauri::command]
-fn open_settings_window(app: AppHandle) -> Result<(), String> {
+async fn open_settings_window(app: AppHandle) -> Result<(), String> {
     open_or_focus_settings_window(&app);
+    Ok(())
+}
+
+#[tauri::command]
+async fn close_settings_window(app: AppHandle) -> Result<(), String> {
+    if let Some(settings_win) = app.get_webview_window("settings") {
+        let _ = settings_win.hide();
+    }
     Ok(())
 }
 
@@ -197,19 +217,31 @@ fn quit_app(app: AppHandle) {
 }
 
 #[tauri::command]
-fn reset_window_to_bottom_center(window: WebviewWindow) -> Result<(i32, i32), String> {
-    if let Ok(Some(monitor)) = window.current_monitor() {
-        let screen = monitor.size();
-        let win_size = window
-            .outer_size()
-            .unwrap_or(tauri::PhysicalSize { width: 272, height: 38 });
-        let x = 8;
-        let y = (screen.height as i32) - (win_size.height as i32) - 5;
-        let _ = window.set_position(Position::Physical(PhysicalPosition { x, y }));
-        return Ok((x, y));
+fn reset_window_to_bottom_center(app: AppHandle) -> Result<(i32, i32), String> {
+    if let Some(main_win) = app.get_webview_window("main") {
+        if let Ok(Some(monitor)) = main_win.current_monitor() {
+            let screen = monitor.size();
+            let win_size = main_win
+                .outer_size()
+                .unwrap_or(tauri::PhysicalSize { width: 360, height: 44 });
+            let x = 8;
+            let y = (screen.height as i32) - (win_size.height as i32) - 4;
+            let _ = main_win.set_position(Position::Physical(PhysicalPosition { x, y }));
+            return Ok((x, y));
+        }
+        let _ = main_win.set_position(Position::Physical(PhysicalPosition { x: 8, y: 1040 }));
     }
-    let _ = window.set_position(Position::Physical(PhysicalPosition { x: 8, y: 1040 }));
     Ok((8, 1040))
+}
+
+fn attach_settings_window_close_guard(settings_win: &WebviewWindow) {
+    let win_clone = settings_win.clone();
+    settings_win.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = win_clone.hide();
+        }
+    });
 }
 
 fn open_or_focus_settings_window(app: &AppHandle) {
@@ -220,18 +252,30 @@ fn open_or_focus_settings_window(app: &AppHandle) {
         return;
     }
 
-    let _ = WebviewWindowBuilder::new(
-        app,
-        "settings",
-        WebviewUrl::App("index.html#settings".into()),
-    )
-    .title("AuraLine — 任务栏车载频谱设置")
-    .inner_size(480.0, 650.0)
-    .resizable(false)
-    .decorations(true)
-    .transparent(false)
-    .center()
-    .build();
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        if let Ok(win) = WebviewWindowBuilder::new(
+            &app_clone,
+            "settings",
+            WebviewUrl::App("index.html".into()),
+        )
+        .initialization_script(
+            "window.__AURALINE_WINDOW_LABEL__ = 'settings'; window.location.hash = '#settings';",
+        )
+        .title("AuraLine — 任务栏车载频谱设置")
+        .inner_size(500.0, 700.0)
+        .min_inner_size(440.0, 540.0)
+        .resizable(true)
+        .decorations(true)
+        .transparent(false)
+        .center()
+        .build()
+        {
+            attach_settings_window_close_guard(&win);
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+    });
 }
 
 /// Generates a 32x32 RGBA car stereo equalizer spectrum icon in memory for the Windows System Tray.
@@ -466,6 +510,9 @@ pub fn run() {
         .manage(taskbar_cfg)
         .setup(move |app| {
             let handle = app.handle().clone();
+            if let Some(settings_win) = app.get_webview_window("settings") {
+                attach_settings_window_close_guard(&settings_win);
+            }
             spawn_single_instance_wakeup_listener(instance_listener, handle.clone());
             let _ = setup_system_tray(&handle);
             audio_loopback::spawn_soundcard_loopback(handle.clone());
@@ -483,6 +530,7 @@ pub fn run() {
             resize_main_bar_window,
             broadcast_settings,
             open_settings_window,
+            close_settings_window,
             quit_app,
             reset_window_to_bottom_center
         ])
