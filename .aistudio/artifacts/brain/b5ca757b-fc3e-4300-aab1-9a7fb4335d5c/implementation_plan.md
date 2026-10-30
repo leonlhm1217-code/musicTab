@@ -1,100 +1,80 @@
-# AuraLine Native — 基于 Tauri v2 + Rust 声卡直连的原生桌面隐身细线工程
+# AuraLine — 100% 开箱即用 Tauri v2 + Rust 声卡直连完整实装方案
 
-将项目统一重构为 **Tauri v2 + Rust (`cpal` + `rustfft`) 原生桌面挂件工程**。程序启动后直接由底层 Rust 线程通过系统声卡硬件环回（Windows WASAPI Loopback / macOS CoreAudio）全自动静默抓取 QQ音乐 正在播放的音频流，彻底脱离浏览器与权限弹窗；前端移除所有手动切换音源的多余按钮，仅保留 **隐身声学细线** 本体以及极简的 **色彩预设、细线长宽与自动休眠** 微调项。
+本方案将此前写在 `README.md` “后续扩展提示”中的所有待办项（`@tauri-apps/api` 官方 SDK 绑定、`tauri.conf.json` 全局 IPC 桥接、Rust 声卡热拔插自动重连、以及桌面鼠标穿透控制）**全部一次性实装到当前仓库中**，确保您克隆仓库后只需执行 `npm install && npx tauri dev` 即可 100% 零修改直接运行。
 
 ---
 
-## 用户确认与关键决策
+## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> 以下核心架构已根据您的最新选择锁定，确认后将立即在仓库中生成完整的 `src-tauri/` 原生工程代码并精简前端：
+> 本次升级将消除所有“预留接口”或“需手动安装补充包”的步骤，把前后端与 Rust 声卡底层彻底打通为成品状态：
 
-- **确认决策 1（原生 Tauri + Rust 桌面工程落地）**：在仓库中完整构建 `src-tauri/` 目录（包含 `Cargo.toml`、`tauri.conf.json`、`build.rs`、`src/main.rs`、`src/lib.rs` 与 `src/audio_loopback.rs`），使用 Rust `cpal` 直接将系统默认输出声卡作为环回输入流打开，并在 Rust 层完成 60FPS 的三频 FFT、主音高、分贝与瞬态节拍计算，通过 Tauri IPC 事件实时推送给前端。
-- **确认决策 2（启动即全自动静默连声卡 · 零音源按钮）**：彻底删除前端底部的「系统共享 / 麦克风 / WASAPI桥接 / 测试流 / 本地文件」等所有手动音源按钮以及冗余的 Python 脚本。应用一打开即自动按优先级静默绑定声卡（Tauri 原生環境下自动接收 Rust `audio-telemetry` 声卡事件；纯网页预览环境下自动静默绑定本机默认声卡环回通道并带无感回退）。
-- **确认决策 3（极致精简的界面元素）**：画面中央仅保留 **隐身声学细线**（含三频流体光晕、随音高滑动核心、`isBeat` 瞬时加粗高光闪烁、底部 `-40dB` 阈值超细实时音量条）；微调栏仅保留 **四套色彩预设（极简白 / 深海静谧 / 活力律动 / 森屿微光）**、**长度与粗细滑块** 以及 **自动休眠开关**。
-
----
-
-## 1. 产品概览与核心理念
-
-- **核心功能**：
-  1. **Rust 原生声卡硬件环回直连 (`src-tauri/src/audio_loopback.rs`)**：无需虚拟声卡、无需开启“立体声混音”、无需任何弹窗确认，Rust 后台线程直接监听默认扬声器/耳机的输出流，100% 在本机内存中完成信号解构。
-  2. **透明无边框置顶窗口 (`tauri.conf.json`)**：原生窗口默认配置为 `decorations: false`（无标题栏边框）、`transparent: true`（背景全透明）、`alwaysOnTop: true`（常驻置顶）与 `skipTaskbar: true`（不占用任务栏图标），可直接拖到 QQ音乐桌面歌词正下方融为一体。
-  3. **多维声学隐身细线 (`MiniAuraWidget`)**：
-     - **三频乐器流光**：左段低频（20–250Hz 鼓/贝斯）· 中段随主音高（Pitch）平滑游走的人声/琴键核心（250–2500Hz）· 右段高频星尘微粒（2.5k–14kHz）。
-     - **节拍瞬时加粗与高光闪烁**：当 `isBeat` 触发时，细线胶囊瞬时轻微加粗并绽放中心白光高光层。
-     - **底部 `-40dB` 超细音量条**：仅当实时音量高于 `-40dB` 时在细线底部浮现 `1.5px` 动态渐变进度条，静音时完全隐形。
-     - **自动休眠省电**：连续无声音输入达到设定秒数后自动降至 `0 FPS`（停止重绘）或 `2 FPS` 待机，有声音时 `<0.2s` 毫秒级唤醒。
+- **Confirmed Decision 1（内置官方 `@tauri-apps/api` 与 `withGlobalTauri: true` 双重绑定）**：直接在项目依赖中预装 `@tauri-apps/api` 与 `@tauri-apps/cli`，并在 Tauri 配置中开启 `"withGlobalTauri": true`。前端声学引擎将直接使用官方 `@tauri-apps/api/event` 的 `listen` 与 `@tauri-apps/api/core` 的 `invoke`，同时向下兼容全局对象与浏览器预览回退。
+- **Confirmed Decision 2（Rust 声卡耳机/扬声器热拔插自动重连）**：在 Rust 音频采集线程中加入设备状态监控与断流自动重连循环——当办公电脑插入/拔出耳机或切换默认播放设备时，无需重启软件，2 秒内自动无缝挂载新声卡。
+- **Confirmed Decision 3（原生无边框窗口拖拽与鼠标穿透控制）**：在微调栏与纯细线模式中实装真实的 Tauri `set_click_through` 调用与窗口拖拽支持，让细线真正贴合在 QQ 音乐桌面歌词下方。
 
 ---
 
-## 2. 用户体验与视觉设计
+## 1. Overview & Core Concept
 
-### 关键用户流程
-1. **零操作即开即用**：启动应用后无需点击任何“开始监听”按钮，底层已自动连接默认声卡输出；当 QQ音乐 播放时，隐身细线自动唤醒并随音量、音调和乐器频段呼吸律动；当 QQ音乐 暂停超过 10 秒时，细线自动进入 `0 FPS` 休眠状态。
-2. **微调与彻底隐身**：鼠标移入底部时浮现单行极简微调条（仅含：色彩预设切换 · 细线长度/粗细滑块 · 自动休眠配置 · 纯细线隐身开关）；按下 `Alt + H` 或点击「纯细线」即可隐藏微调条，整个窗口只剩下一条悬浮细线。
-
-### 视觉识别与色彩预设
-- **极简白（默认 · 黑白对比）**：冷钛银低频 · 纯白高反差中频 · 铂金微粒高频。
-- **深海静谧（蓝紫色系）**：深邃靛蓝低频 · 海洋青蓝中频 · 星云紫泛音高频。
-- **活力律动（橙红色系）**：绯红重低音 · 暖橙人声主旋律 · 流金琥珀高频。
-- **森屿微光（青翠色系）**：翡翠冷杉低频 · 薄荷青中频 · 冰青星尘高频。
+- **What It Does**：**AuraLine** 是一根贴合在 QQ 音乐桌面歌词下方的 `360 × 8 px` 隐身声学细线。启动后由 Rust 原生线程直接从系统默认声卡（WASAPI Loopback / CoreAudio）捕获实时音频，通过 1024 点 FFT 解算低/中/高三频段流体光晕、主音音高游走、鼓点瞬时加粗闪烁与 `-40dB` 极细实时音量条。
+- **Target Audience / Persona**：在办公电脑上使用 QQ 音乐听歌、追求极致桌面隐蔽性与超低 CPU 占用（静音自动 0 FPS 休眠）的用户。
+- **Key Value**：100% 开箱即用，克隆仓库后无需再手动安装额外 Tauri 依赖或补写任何桥接代码。
 
 ---
 
-## 3. 核心架构决策与权衡
+## 2. User Experience & Visual Design
 
-- **决策 1：Rust 层直接完成 FFT 频谱与音高计算，仅向前端发送轻量级标量数据**
-  - *选择方案*：在 `src-tauri/src/audio_loopback.rs` 中直接利用 `rustfft` 将 1024 点 PCM 音频块解构为 `AudioTelemetryPayload`（仅约 200 字节 JSON），以 ~60Hz 频率通过 Tauri Event 发送给前端。
-  - *原因*：避免将原始高频 PCM 数组跨进程高频序列化到 WebView，使内存与 CPU 占用降到最低，非常适合在办公电脑后台全天候常驻。
-- **决策 2：双环境无缝自适应（Tauri 原生 IPC 优先 + Web 预览自动静默回退）**
-  - *选择方案*：`RealtimeAudioEngine` 启动时自动检测 `window.__TAURI_INTERNALS__`：若运行在本地编译的 Tauri 桌面端，直接订阅 Rust `audio-telemetry` 声卡事件流；若运行在 AI Studio 网页预览器中，自动静默启动本地声卡/合成流，且界面不暴露任何杂乱的音源切换按钮。
-  - *原因*：既保证您的本地 Agent 拉取仓库后可直接 `cargo tauri dev / build` 编译出原生声卡直连 `.exe`，又保证当前预览窗口打开就能直接看到细线的动态效果。
+- **Key User Flows**：
+  1. **零操作启动直连**：程序启动后，Rust 后台自动挂载系统默认输出声卡并推送 `"audio-telemetry"` 实时数据流；界面无任何冗余的“选择音源”按钮。
+  2. **耳机/音箱无缝切换**：办公中途插拔耳机或蓝牙音箱时，Rust 守护循环自动重新捕获新的默认输出设备，细线律动不中断。
+  3. **微调与隐身穿透**：底部单行极简微调栏提供 4 套壁纸色彩预设（极简白、深海静谧、活力律动、森屿微光）、长宽调节、自动休眠定时与**窗口锁定/鼠标穿透**开关；按 `Alt + H` 可完全隐藏微调栏，仅留桌面细线。
+- **Visual Identity & Theme**：
+  - *Aesthetic Direction*：极致内敛的声学微件（Atmospheric Minimalism & High-Craft UI）。
+  - *Color Palette & Mood*：深色模式采用 `#09090B` 哑光深空黑，浅色模式采用 `#F4F4F5` 极简雾白，Tauri 原生模式下支持全透明无边框悬浮。
+  - *Typography & Hierarchy*：标题采用 `Outfit`，界面控制文字采用 `Plus Jakarta Sans`，分贝/尺寸/帧率等精密读数采用 `JetBrains Mono` (`tabular-nums`)。
 
 ---
 
-## 4. 技术架构与数据流设计
+## 3. Key Product Decisions & Trade-Offs
 
-```
+- **Decision 1：官方 `@tauri-apps/api` ES Module 导入 + 动态回退机制**
+  - *Chosen Approach*：直接安装 `@tauri-apps/api`，在前端通过 `@tauri-apps/api/event` 的 `listen('audio-telemetry')` 和 `@tauri-apps/api/core` 的 `invoke('set_click_through')` 进行强类型调用，并在 `tauri.conf.json` 同步开启 `withGlobalTauri: true`。
+  - *Why*：彻底避免 Tauri v2 默认关闭全局注入时导致的事件监听失效问题，同时保持在 Web 预览环境下的平滑兼容。
+- **Decision 2：Rust 端声卡守护循环（Watchdog Reconnect Loop）**
+  - *Chosen Approach*：当 `cpal` 音频流触发断开错误（如拔出 USB 耳机）或连续无回调脉冲时，Rust 采集线程自动销毁旧流并重新查询 `host.default_output_device()` 重建 WASAPI Loopback 流。
+  - *Why*：办公电脑经常在扬声器与耳机之间切换，自动重连能保证全天候稳定运行而无需手动重启软件。
+
+---
+
+## 4. Technical Architecture & Data Strategy *(Technical Reference)*
+
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
-│             Rust 原生后台线程 (src-tauri/src/audio_loopback.rs)          │
-│                                                                         │
-│  [系统默认输出声卡 WASAPI Loopback / CoreAudio]                          │
-│         │ (cpal 零弹窗硬件环回采集 48kHz PCM)                            │
-│         ▼                                                               │
-│  [1024点汉宁窗 + rustfft 频谱解构]                                       │
-│   ├─ 低频能量 (20-250Hz 鼓/贝斯)     ├─ 主音高估算 (Dominant Pitch Hz)  │
-│   ├─ 中频能量 (250-2500Hz 人声/琴)   ├─ 分贝计算 (dB Level > -40dB检测) │
-│   └─ 高频能量 (2.5k-14kHz 弦乐/镲)   └─ 瞬态重拍检测 (Onset isBeat)     │
-│         │                                                               │
-│         ▼ Tauri IPC Event: "audio-telemetry" (~60Hz, 静默时自动降频)     │
-└─────────┼───────────────────────────────────────────────────────────────┘
-          │
-          ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                前端极简渲染层 (透明无边框置顶窗口 / Web 预览)             │
+│                    Tauri v2 Native Desktop Runtime                      │
 │                                                                         │
 │  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │ 隐身声学细线核心 (MiniAuraWidget)                                  │  │
-│  │  • 三频流体光晕层 (左低频脉冲 · 中频随音高游走 · 右高频星尘微粒)    │  │
-│  │  • isBeat 瞬时轻微加粗 + 中心白光渐变高光闪烁                      │  │
-│  │  • 底部 1.5px 动态填充音量进度条 (仅在 > -40dB 时显示)             │  │
-│  │  • 自动休眠控制 (连续静默超阈值后 0 FPS 停止重绘或 2 FPS 待机)     │  │
-│  └───────────────────────────────────────────────────────────────────┘  │
+│  │ Rust Backend (cpal + rustfft + Hot-Plug Watchdog Loop)            │  │
+│  │  • Queries Host::default_output_device() (WASAPI Loopback)        │  │
+│  │  • Auto-reconnects on device switch / stream error every 2s       │  │
+│  │  • 1024-pt Hann FFT -> 3-Band Energy + Pitch + Beat + -40dB RMS   │  │
+│  │  • Emits "audio-telemetry" via Tauri IPC (~30 FPS)                │  │
+│  └───────────────────────────────┬───────────────────────────────────┘  │
+│                                  │ @tauri-apps/api/event::listen        │
+│                                  ▼                                      │
 │  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │ 单行极简微调栏 (可按 Alt + H 完全隐藏，无任何音源切换按钮)          │  │
-│  │  [色彩预设: 极简白 / 深海静谧 / 活力律动 / 森屿微光]               │  │
-│  │  [细线长度 160-640px]  [粗细 4-16px]  [自动休眠: 5s/10s/30s/60s]   │  │
+│  │ React 19 Frontend Engine & Stealth Fine Line View                 │  │
+│  │  • RealtimeAudioEngine: Native IPC listener + Spring physics      │  │
+│  │  • MiniAuraWidget: 3-Band Fluid + Beat Flash + -40dB Volume Bar   │  │
+│  │  • Auto-Sleep Controller: 0 FPS freeze / 2 FPS standby on silence │  │
+│  │  • Window Controller: @tauri-apps/api/core::invoke Click-Through  │  │
 │  └───────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 仓库新增与重构结构
-- **新增 Tauri + Rust 原生工程目录 (`src-tauri/`)**：
-  - `src-tauri/Cargo.toml`：配置 `tauri`、`cpal`、`rustfft`、`serde` 依赖。
-  - `src-tauri/tauri.conf.json`：配置无边框、背景透明、常驻置顶、跳过任务栏的迷你窗口（`420 × 64 px`）。
-  - `src-tauri/src/audio_loopback.rs`：实现完整的声卡默认输出设备环回采集、1024 点汉宁窗 FFT、三频能量积分、主音高检测与节拍识别。
-  - `src-tauri/src/lib.rs` & `src-tauri/src/main.rs`：启动时自动拉起 `spawn_wasapi_loopback` 后台线程，并注册窗口拖拽与穿透指令。
-- **精简前端与更新 `README.md`**：
-  - 移除 `scripts/local_soundcard_bridge.py` 及前端所有手动切换音源按钮，实现启动即自动监听。
-  - 更新 `README.md` 为纯粹的 **Tauri v2 + Rust 原生声卡直连开发与编译手册**，方便您的本地 Agent 直接接手构建。
+- **Data Model & State**：
+  - `AudioTelemetryPayload`：包含 `rmsVolume`、`dbLevel`、`bassEnergy`、`midEnergy`、`trebleEnergy`、`dominantPitchHz`、`isBeat`、`waveformSlice`。
+  - `StealthLineSettings`：持久化于 `localStorage`，管理色彩预设、细线长度/粗细、自动休眠阈值及省电策略。
+- **Interactive Component & State Mapping**：
+  - 启动时自动执行 `@tauri-apps/api/event` 的 `listen('audio-telemetry')` 绑定。
+  - 用户点击微调栏中的“纯细线/穿透锁定”或按 `Alt + H` 时，同步管理 UI 隐藏状态与 Tauri 窗口命令。

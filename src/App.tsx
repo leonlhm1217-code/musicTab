@@ -8,12 +8,11 @@ import {
   AURA_THEMES,
   AuraThemeId,
   AudioTelemetry,
-  AutoSleepBehavior,
   StealthLineSettings,
 } from './types/audio';
 import { RealtimeAudioEngine } from './services/audioEngine';
 import { MiniAuraWidget } from './components/MiniAuraWidget';
-import { Cpu, Eye, EyeOff, Moon, Palette, Sun } from 'lucide-react';
+import { Cpu, Eye, EyeOff, Lock, Moon, Palette, Sun, Unlock } from 'lucide-react';
 
 const STORAGE_KEY = 'auraline_native_settings_v1';
 
@@ -66,8 +65,9 @@ export default function App() {
 
   const [settings, setSettings] = useState<StealthLineSettings>(loadSavedSettings);
   const [hideControls, setHideControls] = useState<boolean>(false);
+  const [clickThroughLocked, setClickThroughLocked] = useState<boolean>(false);
 
-  // Free drag position for the stealth line when inside a larger window
+  // Free drag position for the stealth line when inside a web preview window
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const isDraggingRef = useRef<boolean>(false);
   const dragStartRef = useRef<{ startX: number; startY: number; origX: number; origY: number }>({
@@ -90,6 +90,11 @@ export default function App() {
       return next;
     });
     engineRef.current?.resetSilenceTimer();
+  }, []);
+
+  const toggleClickThrough = useCallback((nextIgnore: boolean) => {
+    setClickThroughLocked(nextIgnore);
+    engineRef.current?.setNativeClickThrough(nextIgnore);
   }, []);
 
   // Automatically connect to soundcard on launch (Zero manual audio buttons)
@@ -148,19 +153,33 @@ export default function App() {
     settings.workLowPower30Fps,
   ]);
 
-  // Shortcut Alt + H toggles control bar visibility for instant pure stealth
+  // Shortcut Alt + H toggles pure stealth mode & releases click-through lock when restoring UI
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.altKey && (e.key === 'h' || e.key === 'H')) {
         e.preventDefault();
-        setHideControls((v) => !v);
+        setHideControls((prev) => {
+          const next = !prev;
+          if (!next) {
+            toggleClickThrough(false);
+          }
+          return next;
+        });
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [toggleClickThrough]);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (clickThroughLocked) return;
+
+    // In Tauri native desktop runtime, invoke native OS frameless window dragging
+    if (engineRef.current?.isRunningInTauri()) {
+      engineRef.current.startNativeWindowDrag();
+      return;
+    }
+
     isDraggingRef.current = true;
     dragStartRef.current = {
       startX: e.clientX,
@@ -202,8 +221,11 @@ export default function App() {
       {hideControls && (
         <button
           type="button"
-          onClick={() => setHideControls(false)}
-          title="展开微调栏 (Alt + H)"
+          onClick={() => {
+            setHideControls(false);
+            toggleClickThrough(false);
+          }}
+          title="展开微调栏并解除鼠标穿透 (Alt + H)"
           className={`fixed top-2.5 right-3 z-30 p-1.5 rounded-md opacity-10 hover:opacity-90 transition-opacity cursor-pointer ${
             isLight ? 'text-zinc-700 hover:bg-zinc-200' : 'text-zinc-400 hover:bg-zinc-800'
           }`}
@@ -225,14 +247,22 @@ export default function App() {
           style={{
             transform: `translate3d(${dragOffset.x}px, ${dragOffset.y}px, 0)`,
           }}
-          title="按住可拖动隐身细线位置"
-          className="cursor-grab active:cursor-grabbing touch-none py-3 px-4"
+          title={
+            clickThroughLocked
+              ? '已开启鼠标穿透锁定 (按 Alt + H 解锁)'
+              : '按住可拖动隐身细线位置'
+          }
+          className={`${
+            clickThroughLocked
+              ? 'pointer-events-none'
+              : 'cursor-grab active:cursor-grabbing'
+          } touch-none py-3 px-4`}
         >
           <MiniAuraWidget telemetryRef={telemetryRef} settings={settings} />
         </div>
       </main>
 
-      {/* ULTRA-MINIMAL SINGLE-ROW TUNING BAR (Only Color Presets, Size Sliders, and Auto-Sleep) */}
+      {/* ULTRA-MINIMAL SINGLE-ROW TUNING BAR (Color Presets, Size Sliders, Auto-Sleep, Click-Through) */}
       {!hideControls && (
         <footer
           className={`px-5 py-2.5 border-t text-[11px] transition-opacity duration-200 opacity-35 hover:opacity-100 ${
@@ -319,7 +349,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* 3. Auto-Sleep CPU Power-Saving & Stealth Toggle */}
+            {/* 3. Auto-Sleep CPU Power-Saving, Click-Through Lock & Stealth Toggle */}
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -395,6 +425,28 @@ export default function App() {
                   {isLight ? <Moon className="w-3.5 h-3.5" /> : <Sun className="w-3.5 h-3.5" />}
                 </button>
               )}
+
+              <button
+                type="button"
+                onClick={() => toggleClickThrough(!clickThroughLocked)}
+                title="开启/关闭桌面鼠标穿透锁定 (Tauri 模式下点击可穿透到下层窗口)"
+                className={`px-2 py-0.5 rounded flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
+                  clickThroughLocked
+                    ? isLight
+                      ? 'bg-zinc-800 text-white'
+                      : 'bg-zinc-200 text-zinc-950 font-medium'
+                    : isLight
+                    ? 'hover:bg-zinc-200'
+                    : 'hover:bg-zinc-800'
+                }`}
+              >
+                {clickThroughLocked ? (
+                  <Lock className="w-3 h-3" />
+                ) : (
+                  <Unlock className="w-3 h-3" />
+                )}
+                <span>{clickThroughLocked ? '已穿透' : '鼠标穿透'}</span>
+              </button>
 
               <button
                 type="button"

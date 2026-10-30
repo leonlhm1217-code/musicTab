@@ -1,8 +1,11 @@
+import { invoke } from '@tauri-apps/api/core';
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { AudioTelemetry } from '../types/audio';
 
 const NOTE_STRINGS = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
-interface TauriTelemetryPayload {
+export interface TauriTelemetryPayload {
   rmsVolume: number;
   dbLevel: number;
   bassEnergy: number;
@@ -11,6 +14,7 @@ interface TauriTelemetryPayload {
   dominantPitchHz: number;
   isBeat: boolean;
   waveformSlice: number[];
+  deviceName?: string;
 }
 
 declare global {
@@ -43,7 +47,7 @@ export class RealtimeAudioEngine {
   private mediaStream: MediaStream | null = null;
   private sourceNode: AudioNode | null = null;
   private silentSynthTimer: number | null = null;
-  private unlistenTauri: (() => void) | null = null;
+  private unlistenTauri: UnlistenFn | null = null;
   private latestNativePacket: TauriTelemetryPayload | null = null;
   private isTauriNative = false;
 
@@ -63,33 +67,75 @@ export class RealtimeAudioEngine {
   }
 
   public isRunningInTauri(): boolean {
-    return Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__);
+    return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__);
+  }
+
+  /**
+   * Invokes the Rust native command `set_click_through` via @tauri-apps/api/core
+   * so mouse clicks pass directly through the transparent window to desktop apps behind it.
+   */
+  public async setNativeClickThrough(ignore: boolean): Promise<void> {
+    if (!this.isRunningInTauri()) return;
+    try {
+      await invoke('set_click_through', { ignore });
+    } catch {
+      try {
+        await getCurrentWindow().setIgnoreCursorEvents(ignore);
+      } catch {
+        // Ignore in web preview fallback
+      }
+    }
+  }
+
+  /**
+   * Starts native frameless OS window dragging via @tauri-apps/api/window or Rust command.
+   */
+  public async startNativeWindowDrag(): Promise<void> {
+    if (!this.isRunningInTauri()) return;
+    try {
+      await getCurrentWindow().startDragging();
+    } catch {
+      try {
+        await invoke('start_window_drag');
+      } catch {
+        // Ignore in web preview fallback
+      }
+    }
   }
 
   /**
    * Automatically connects to the sound card on launch with zero manual buttons:
-   * 1. In Tauri v2 Native Desktop App: Subscribes to Rust `cpal` WASAPI Loopback `"audio-telemetry"` IPC stream.
+   * 1. In Tauri v2 Native Desktop App: Uses official `@tauri-apps/api/event` `listen('audio-telemetry')`
+   *    (plus `withGlobalTauri` fallback) to receive real-time Rust `cpal` WASAPI Loopback packets.
    * 2. In Web Preview Fallback: Attempts silent loopback device binding, or runs an internal zero-speaker-volume
    *    acoustic signal generator into AnalyserNode so the stealth line can be previewed and tuned immediately.
    */
   public async startAutoConnect(): Promise<void> {
     this.stopAll();
 
-    // 1. Check Tauri v2 Native Desktop Environment
+    // 1. Official @tauri-apps/api/event Native Soundcard Subscription
     if (this.isRunningInTauri()) {
       this.isTauriNative = true;
       try {
-        if (window.__TAURI__?.event?.listen) {
-          this.unlistenTauri = await window.__TAURI__.event.listen<TauriTelemetryPayload>(
-            'audio-telemetry',
-            (event) => {
-              this.latestNativePacket = event.payload;
-            }
-          );
-          return;
-        }
+        this.unlistenTauri = await listen<TauriTelemetryPayload>('audio-telemetry', (event) => {
+          this.latestNativePacket = event.payload;
+        });
+        return;
       } catch {
-        // Fallback if Tauri global event bridge is initializing
+        // Secondary fallback to global window.__TAURI__.event.listen
+        try {
+          if (window.__TAURI__?.event?.listen) {
+            this.unlistenTauri = await window.__TAURI__.event.listen<TauriTelemetryPayload>(
+              'audio-telemetry',
+              (event) => {
+                this.latestNativePacket = event.payload;
+              }
+            );
+            return;
+          }
+        } catch {
+          // Continue if running outside Tauri webview
+        }
       }
     }
 
@@ -148,7 +194,7 @@ export class RealtimeAudioEngine {
   }
 
   /**
-   * Feeds a realistic 3-band musical signal into the AnalyserNode (with near-zero speaker gain)
+   * Feeds a realistic 3-band musical signal into the AnalyserNode (with 0.0 speaker gain)
    * when previewed in a browser environment without Tauri native WASAPI loopback.
    */
   private startInternalPreviewSignal(): void {
@@ -325,7 +371,11 @@ export class RealtimeAudioEngine {
           pkt.waveformSlice && pkt.waveformSlice.length > 0
             ? pkt.waveformSlice
             : new Array(48).fill(0),
-        dominantInstrumentLabel: isSleeping ? '自动休眠省电中' : '声卡直连运行中',
+        dominantInstrumentLabel: isSleeping
+          ? '自动休眠省电中'
+          : pkt.deviceName
+          ? `声卡直连: ${pkt.deviceName}`
+          : '声卡直连运行中',
         silentDurationSec,
         isSleeping,
       };

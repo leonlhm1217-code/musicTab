@@ -1,6 +1,6 @@
 {
-  "summary":  "重构为 Tauri v2 + Rust 原生桌面挂件工程方案：在仓库中生成完整的 src-tauri/ Rust 工程（基于 cpal WASAPI Loopback 声卡硬件直连与 rustfft 实时三频/音高计算），并将前端精简为启动即自动静默连声卡、仅保留隐身细线与色彩/尺寸/自动休眠微调的纯粹形态。",
-  "updatedAt":  "2026-10-30T06:14:51.231033333Z",
+  "summary":  "Complete turnkey Tauri v2 + Rust native soundcard loopback integration plan: pre-installs @tauri-apps/api & @tauri-apps/cli, enables withGlobalTauri in tauri.conf.json, implements automatic audio device hot-plug reconnection in Rust, and wires native mouse click-through control so the repo works out-of-the-box with zero manual agent work needed.",
+  "updatedAt":  "2026-10-30T06:51:51.284425445Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

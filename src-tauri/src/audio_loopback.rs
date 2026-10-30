@@ -1,9 +1,13 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Sample, SampleFormat};
+use cpal::{Device, Sample, SampleFormat, SupportedStreamConfig};
 use rustfft::{num_complex::Complex, FftPlanner};
 use serde::Serialize;
 use std::f32::consts::PI;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 const FFT_SIZE: usize = 1024;
@@ -19,6 +23,7 @@ pub struct AudioTelemetryPayload {
     pub dominant_pitch_hz: u32,
     pub is_beat: bool,
     pub waveform_slice: Vec<f32>,
+    pub device_name: String,
 }
 
 struct DspState {
@@ -44,7 +49,12 @@ impl DspState {
         }
     }
 
-    fn process_block(&mut self, samples: &[f32], sample_rate: f32) -> AudioTelemetryPayload {
+    fn process_block(
+        &mut self,
+        samples: &[f32],
+        sample_rate: f32,
+        device_name: &str,
+    ) -> AudioTelemetryPayload {
         // 1. Time-domain RMS & 48-point downsampled waveform slice
         let mut sum_sq = 0.0_f32;
         for &s in samples {
@@ -170,80 +180,137 @@ impl DspState {
             dominant_pitch_hz,
             is_beat,
             waveform_slice,
+            device_name: device_name.to_string(),
         }
     }
 }
 
-/// Spawns a background Rust thread that automatically binds to the default sound card
-/// output loopback (WASAPI Loopback on Windows) and emits `"audio-telemetry"` IPC events.
+fn select_default_loopback_device(host: &cpal::Host) -> Option<(Device, SupportedStreamConfig, String)> {
+    // Priority 1: System Default Output Device (WASAPI Loopback captures speaker/headphone output directly)
+    if let Some(out_dev) = host.default_output_device() {
+        if let Ok(cfg) = out_dev.default_output_config() {
+            let name = out_dev.name().unwrap_or_else(|_| "Default Output Loopback".to_string());
+            return Some((out_dev, cfg, name));
+        }
+    }
+    // Priority 2: System Default Input Device (Stereo Mix / Loopback fallback)
+    if let Some(in_dev) = host.default_input_device() {
+        if let Ok(cfg) = in_dev.default_input_config() {
+            let name = in_dev.name().unwrap_or_else(|_| "Default Audio Input".to_string());
+            return Some((in_dev, cfg, name));
+        }
+    }
+    None
+}
+
+/// Spawns a persistent background Rust watchdog thread that automatically binds to the default
+/// sound card output loopback (WASAPI Loopback on Windows) and seamlessly reconnects whenever
+/// headphones/speakers are plugged in, unplugged, or switched.
 pub fn spawn_soundcard_loopback(app: AppHandle) {
     std::thread::spawn(move || {
-        let host = cpal::default_host();
-
-        // Priority 1: System Default Output Device (WASAPI Loopback captures speaker/headphone output directly)
-        // Priority 2: System Default Input Device (Stereo Mix / Loopback mic fallback)
-        let (device, config) = if let Some(out_dev) = host.default_output_device() {
-            if let Ok(cfg) = out_dev.default_output_config() {
-                (out_dev, cfg)
-            } else if let Some(in_dev) = host.default_input_device() {
-                let cfg = in_dev.default_input_config().expect("无法读取默认音频输入配置");
-                (in_dev, cfg)
-            } else {
-                return;
-            }
-        } else if let Some(in_dev) = host.default_input_device() {
-            let cfg = in_dev.default_input_config().expect("无法读取默认音频输入配置");
-            (in_dev, cfg)
-        } else {
-            return;
-        };
-
-        let sample_rate = config.sample_rate().0 as f32;
-        let channels = config.channels() as usize;
-        let sample_format = config.sample_format();
-        let stream_config: cpal::StreamConfig = config.into();
-
         let state = Arc::new(Mutex::new(DspState::new()));
-        let state_ref = state.clone();
-        let app_ref = app.clone();
 
-        let err_fn = |err| eprintln!("[AuraLine Audio Loopback] 声卡流错误: {}", err);
+        loop {
+            let host = cpal::default_host();
+            let Some((device, config, active_device_name)) = select_default_loopback_device(&host) else {
+                // No audio device available right now; retry in 2 seconds
+                std::thread::sleep(Duration::from_secs(2));
+                continue;
+            };
 
-        let stream = match sample_format {
-            SampleFormat::F32 => device.build_input_stream(
-                &stream_config,
-                move |data: &[f32], _| {
-                    push_and_emit(data, channels, sample_rate, &state_ref, &app_ref);
-                },
-                err_fn,
-                None,
-            ),
-            SampleFormat::I16 => device.build_input_stream(
-                &stream_config,
-                move |data: &[i16], _| {
-                    let converted: Vec<f32> = data.iter().map(|&s| s.to_float_sample()).collect();
-                    push_and_emit(&converted, channels, sample_rate, &state_ref, &app_ref);
-                },
-                err_fn,
-                None,
-            ),
-            SampleFormat::U16 => device.build_input_stream(
-                &stream_config,
-                move |data: &[u16], _| {
-                    let converted: Vec<f32> = data.iter().map(|&s| s.to_float_sample()).collect();
-                    push_and_emit(&converted, channels, sample_rate, &state_ref, &app_ref);
-                },
-                err_fn,
-                None,
-            ),
-            _ => return,
-        };
+            let sample_rate = config.sample_rate().0 as f32;
+            let channels = config.channels() as usize;
+            let sample_format = config.sample_format();
+            let stream_config: cpal::StreamConfig = config.into();
 
-        if let Ok(s) = stream {
-            let _ = s.play();
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(3600));
+            let state_ref = state.clone();
+            let app_ref = app.clone();
+            let dev_name_for_cb = active_device_name.clone();
+
+            let stream_broken = Arc::new(AtomicBool::new(false));
+            let broken_for_err = stream_broken.clone();
+
+            let err_fn = move |err| {
+                eprintln!("[AuraLine Audio Loopback] 声卡流状态变更，准备自动重连: {}", err);
+                broken_for_err.store(true, Ordering::SeqCst);
+            };
+
+            let stream_result = match sample_format {
+                SampleFormat::F32 => device.build_input_stream(
+                    &stream_config,
+                    move |data: &[f32], _| {
+                        push_and_emit(
+                            data,
+                            channels,
+                            sample_rate,
+                            &dev_name_for_cb,
+                            &state_ref,
+                            &app_ref,
+                        );
+                    },
+                    err_fn,
+                    None,
+                ),
+                SampleFormat::I16 => device.build_input_stream(
+                    &stream_config,
+                    move |data: &[i16], _| {
+                        let converted: Vec<f32> = data.iter().map(|&s| s.to_float_sample()).collect();
+                        push_and_emit(
+                            &converted,
+                            channels,
+                            sample_rate,
+                            &dev_name_for_cb,
+                            &state_ref,
+                            &app_ref,
+                        );
+                    },
+                    err_fn,
+                    None,
+                ),
+                SampleFormat::U16 => device.build_input_stream(
+                    &stream_config,
+                    move |data: &[u16], _| {
+                        let converted: Vec<f32> = data.iter().map(|&s| s.to_float_sample()).collect();
+                        push_and_emit(
+                            &converted,
+                            channels,
+                            sample_rate,
+                            &dev_name_for_cb,
+                            &state_ref,
+                            &app_ref,
+                        );
+                    },
+                    err_fn,
+                    None,
+                ),
+                _ => {
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+            };
+
+            if let Ok(stream) = stream_result {
+                if stream.play().is_ok() {
+                    // Watchdog loop: check every 2 seconds for stream error OR default device hot-swap
+                    loop {
+                        std::thread::sleep(Duration::from_secs(2));
+                        if stream_broken.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        if let Some(current_out) = host.default_output_device() {
+                            if let Ok(current_name) = current_out.name() {
+                                if current_name != active_device_name {
+                                    // User switched headphones / speakers! Drop old stream and bind new device
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
+
+            // Brief pause before re-initializing stream on new device
+            std::thread::sleep(Duration::from_millis(400));
         }
     });
 }
@@ -252,6 +319,7 @@ fn push_and_emit(
     interleaved: &[f32],
     channels: usize,
     sample_rate: f32,
+    device_name: &str,
     state: &Arc<Mutex<DspState>>,
     app: &AppHandle,
 ) {
@@ -267,7 +335,7 @@ fn push_and_emit(
 
     while guard.ring_buffer.len() >= FFT_SIZE {
         let block: Vec<f32> = guard.ring_buffer.drain(0..FFT_SIZE).collect();
-        let payload = guard.process_block(&block, sample_rate);
+        let payload = guard.process_block(&block, sample_rate, device_name);
         let _ = app.emit("audio-telemetry", payload);
     }
 }
