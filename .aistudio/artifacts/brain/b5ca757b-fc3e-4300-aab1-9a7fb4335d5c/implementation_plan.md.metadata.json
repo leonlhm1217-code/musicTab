@@ -1,6 +1,6 @@
 {
-  "summary":  "Updated implementation plan with strict Zero-Microphone Policy: physically disables all microphone/input device access in both Rust (only binds default_output_device WASAPI Loopback) and Frontend (removes all getUserMedia microphone calls and permissions), plus GitHub Actions .exe build, local build-exe.bat, Windows System Tray, and window position persistence.",
-  "updatedAt":  "2026-10-30T08:35:01.583912340Z",
+  "summary":  "Implementation plan for the 4 final desktop optimizations: (1) WASAPI pause silence decay & heartbeat fix for Auto-Sleep, (2) 20%-100% Master Opacity slider in Settings, (3) Mouse wheel opacity tuning & double-click to open Settings on the fine line, and (4) Single-instance protection + Windows HKCU Startup auto-launch toggle in Tray & Settings.",
+  "updatedAt":  "2026-10-30T09:45:36.283504021Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

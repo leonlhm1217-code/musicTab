@@ -4,10 +4,10 @@ use rustfft::{num_complex::Complex, FftPlanner};
 use serde::Serialize;
 use std::f32::consts::PI;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
 const FFT_SIZE: usize = 1024;
@@ -24,6 +24,29 @@ pub struct AudioTelemetryPayload {
     pub is_beat: bool,
     pub waveform_slice: Vec<f32>,
     pub device_name: String,
+}
+
+impl AudioTelemetryPayload {
+    fn silent(device_name: &str) -> Self {
+        Self {
+            rms_volume: 0.0,
+            db_level: -60,
+            bass_energy: 0.0,
+            mid_energy: 0.0,
+            treble_energy: 0.0,
+            dominant_pitch_hz: 0,
+            is_beat: false,
+            waveform_slice: vec![0.0; 48],
+            device_name: device_name.to_string(),
+        }
+    }
+}
+
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::from_millis(0))
+        .as_millis() as u64
 }
 
 struct DspState {
@@ -47,6 +70,13 @@ impl DspState {
             beat_cooldown: 0,
             smooth_pitch: 0.0,
         }
+    }
+
+    fn reset_on_silence(&mut self) {
+        self.ring_buffer.clear();
+        self.prev_bass = 0.0;
+        self.beat_cooldown = 0;
+        self.smooth_pitch = 0.0;
     }
 
     fn process_block(
@@ -203,8 +233,8 @@ fn select_output_only_loopback_device(
 }
 
 /// Spawns a persistent background Rust watchdog thread that binds ONLY to the default
-/// speaker/headphone output loopback (WASAPI Loopback on Windows) and seamlessly reconnects
-/// whenever headphones/speakers are plugged in, unplugged, or switched.
+/// speaker/headphone output loopback (WASAPI Loopback on Windows), emits silence heartbeats
+/// when Windows pauses WASAPI callbacks on music pause, and seamlessly reconnects on device switch.
 pub fn spawn_soundcard_loopback(app: AppHandle) {
     std::thread::spawn(move || {
         let state = Arc::new(Mutex::new(DspState::new()));
@@ -214,7 +244,10 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
             let Some((device, config, active_device_name)) =
                 select_output_only_loopback_device(&host)
             else {
-                // No speaker/headphone output device active; wait quietly without ever touching microphones
+                let _ = app.emit(
+                    "audio-telemetry",
+                    AudioTelemetryPayload::silent("等待播放设备接入"),
+                );
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
             };
@@ -225,6 +258,7 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
             let stream_config: cpal::StreamConfig = config.into();
 
             let stream_broken = Arc::new(AtomicBool::new(false));
+            let last_callback_ms = Arc::new(AtomicU64::new(now_epoch_ms()));
 
             let stream_result = match sample_format {
                 SampleFormat::F32 => {
@@ -232,9 +266,11 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
                     let app_ref = app.clone();
                     let dev_name_for_cb = active_device_name.clone();
                     let broken_for_err = stream_broken.clone();
+                    let cb_time_ref = last_callback_ms.clone();
                     device.build_input_stream(
                         &stream_config,
                         move |data: &[f32], _| {
+                            cb_time_ref.store(now_epoch_ms(), Ordering::Relaxed);
                             push_and_emit(
                                 data,
                                 channels,
@@ -256,9 +292,11 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
                     let app_ref = app.clone();
                     let dev_name_for_cb = active_device_name.clone();
                     let broken_for_err = stream_broken.clone();
+                    let cb_time_ref = last_callback_ms.clone();
                     device.build_input_stream(
                         &stream_config,
                         move |data: &[i16], _| {
+                            cb_time_ref.store(now_epoch_ms(), Ordering::Relaxed);
                             let converted: Vec<f32> =
                                 data.iter().map(|&s| (s as f32) / 32768.0).collect();
                             push_and_emit(
@@ -282,9 +320,11 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
                     let app_ref = app.clone();
                     let dev_name_for_cb = active_device_name.clone();
                     let broken_for_err = stream_broken.clone();
+                    let cb_time_ref = last_callback_ms.clone();
                     device.build_input_stream(
                         &stream_config,
                         move |data: &[u16], _| {
+                            cb_time_ref.store(now_epoch_ms(), Ordering::Relaxed);
                             let converted: Vec<f32> = data
                                 .iter()
                                 .map(|&s| ((s as f32) - 32768.0) / 32768.0)
@@ -313,16 +353,45 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
 
             if let Ok(stream) = stream_result {
                 if stream.play().is_ok() {
-                    // Watchdog loop: check every 2 seconds for stream error OR default output device hot-swap
+                    let mut tick_count = 0u32;
+                    let mut was_silent_idle = false;
+
+                    // 100ms precision watchdog:
+                    // 1. Detects when Windows WASAPI pauses callbacks during music pause (>140ms idle)
+                    //    and emits explicit zero-silence telemetry so the bar returns to calm & auto-sleeps.
+                    // 2. Checks every 2s for stream error or default output device hot-swap.
                     loop {
-                        std::thread::sleep(Duration::from_secs(2));
+                        std::thread::sleep(Duration::from_millis(100));
+                        tick_count = tick_count.wrapping_add(1);
+
                         if stream_broken.load(Ordering::SeqCst) {
                             break;
                         }
-                        if let Some(current_out) = host.default_output_device() {
-                            if let Ok(current_name) = current_out.name() {
-                                if current_name != active_device_name {
-                                    break;
+
+                        let idle_ms =
+                            now_epoch_ms().saturating_sub(last_callback_ms.load(Ordering::Relaxed));
+                        if idle_ms > 140 {
+                            if !was_silent_idle {
+                                if let Ok(mut guard) = state.lock() {
+                                    guard.reset_on_silence();
+                                }
+                                was_silent_idle = true;
+                            }
+                            let _ = app.emit(
+                                "audio-telemetry",
+                                AudioTelemetryPayload::silent(&active_device_name),
+                            );
+                        } else {
+                            was_silent_idle = false;
+                        }
+
+                        // Every 2 seconds (20 ticks), check if default output device changed
+                        if tick_count % 20 == 0 {
+                            if let Some(current_out) = host.default_output_device() {
+                                if let Ok(current_name) = current_out.name() {
+                                    if current_name != active_device_name {
+                                        break;
+                                    }
                                 }
                             }
                         }

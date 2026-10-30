@@ -16,15 +16,16 @@
       {
         "label": "main",
         "title": "AuraLine",
-        "width": 440,
-        "height": 84,
-        "minWidth": 200,
-        "minHeight": 32,
+        "width": 480,
+        "height": 52,
+        "minWidth": 180,
+        "minHeight": 28,
         "decorations": false,
         "transparent": true,
+        "shadow": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
-        "resizable": true,
+        "resizable": false,
         "center": false
       }
     ],

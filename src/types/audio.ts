@@ -32,6 +32,7 @@ export interface AuraThemePalette {
 export interface StealthLineSettings {
   lineWidth: number;                   // 160px to 640px (default 360px)
   lineHeight: number;                  // 4px to 16px (default 8px)
+  masterOpacity: number;               // 0.20 to 1.00 (default 1.00) overall bar opacity
   theme: AuraThemeId;
   elasticIntensity: number;            // 0.3 to 2.0
   auraSensitivity: number;             // 0.4 to 1.8

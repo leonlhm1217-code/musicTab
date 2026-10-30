@@ -12,7 +12,8 @@ import {
 } from './types/audio';
 import { RealtimeAudioEngine } from './services/audioEngine';
 import { MiniAuraWidget } from './components/MiniAuraWidget';
-import { Cpu, Eye, EyeOff, Lock, Moon, Palette, RotateCcw, Sun, Unlock } from 'lucide-react';
+import { SettingsPage } from './components/SettingsPage';
+import { Settings, X } from 'lucide-react';
 
 const STORAGE_KEY = 'auraline_native_settings_v1';
 const WEB_DRAG_STORAGE_KEY = 'auraline_web_drag_offset_v1';
@@ -20,6 +21,7 @@ const WEB_DRAG_STORAGE_KEY = 'auraline_web_drag_offset_v1';
 const DEFAULT_SETTINGS: StealthLineSettings = {
   lineWidth: 360,
   lineHeight: 8,
+  masterOpacity: 1.0,
   theme: 'minimal_white',
   elasticIntensity: 1.15,
   auraSensitivity: 1.1,
@@ -78,9 +80,15 @@ export default function App() {
     isSleeping: false,
   });
 
+  const [isSettingsRoute, setIsSettingsRoute] = useState<boolean>(
+    () => typeof window !== 'undefined' && window.location.hash === '#settings'
+  );
   const [settings, setSettings] = useState<StealthLineSettings>(loadSavedSettings);
-  const [hideControls, setHideControls] = useState<boolean>(false);
   const [clickThroughLocked, setClickThroughLocked] = useState<boolean>(false);
+  const [autoStartEnabled, setAutoStartEnabled] = useState<boolean>(false);
+  const [isClosedInWebPreview, setIsClosedInWebPreview] = useState<boolean>(false);
+  const [wheelOpacityHint, setWheelOpacityHint] = useState<number | null>(null);
+  const wheelHintTimerRef = useRef<number | null>(null);
 
   // Persisted drag position for the stealth line when inside a web preview window
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>(loadSavedWebDragOffset);
@@ -94,6 +102,35 @@ export default function App() {
 
   const [isSleepingState, setIsSleepingState] = useState<boolean>(false);
 
+  // Sync hash route changes (#settings vs main desktop fine line)
+  useEffect(() => {
+    const onHashChange = () => {
+      setIsSettingsRoute(window.location.hash === '#settings');
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  // Cross-window real-time settings synchronization (localStorage + Tauri IPC broadcast)
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === STORAGE_KEY && e.newValue) {
+        try {
+          setSettings((prev) => ({ ...prev, ...JSON.parse(e.newValue!) }));
+        } catch {
+          // ignore
+        }
+      }
+    };
+    window.addEventListener('storage', onStorage);
+
+    engineRef.current?.subscribeToSettingsBroadcast((partial) => {
+      setSettings((prev) => ({ ...prev, ...partial }));
+    });
+
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
   const updateSettings = useCallback((partial: Partial<StealthLineSettings>) => {
     setSettings((prev) => {
       const next = { ...prev, ...partial };
@@ -102,6 +139,7 @@ export default function App() {
       } catch {
         // ignore storage quota errors
       }
+      engineRef.current?.syncSettingsAcrossWindows(next);
       return next;
     });
     engineRef.current?.resetSilenceTimer();
@@ -110,6 +148,13 @@ export default function App() {
   const toggleClickThrough = useCallback((nextIgnore: boolean) => {
     setClickThroughLocked(nextIgnore);
     engineRef.current?.setNativeClickThrough(nextIgnore);
+  }, []);
+
+  const handleToggleAutoStart = useCallback(async (nextEnabled: boolean) => {
+    const applied = await engineRef.current?.setAutoStartEnabled(nextEnabled);
+    if (typeof applied === 'boolean') {
+      setAutoStartEnabled(applied);
+    }
   }, []);
 
   const handleResetPosition = useCallback(() => {
@@ -122,25 +167,64 @@ export default function App() {
     engineRef.current?.resetWindowToBottomCenter();
   }, []);
 
+  const handleOpenSettings = useCallback(async () => {
+    const openedNative = await engineRef.current?.openNativeSettingsWindow();
+    if (!openedNative) {
+      window.location.hash = '#settings';
+      setIsSettingsRoute(true);
+    }
+  }, []);
+
+  const handleQuitApp = useCallback(async () => {
+    if (engineRef.current?.isRunningInTauri()) {
+      await engineRef.current.quitNativeApp();
+    } else {
+      setIsClosedInWebPreview(true);
+    }
+  }, []);
+
+  // Mouse wheel on the fine line directly adjusts Master Opacity (20% to 100%)
+  const handleWheelOpacity = useCallback(
+    (e: React.WheelEvent<HTMLDivElement>) => {
+      if (clickThroughLocked) return;
+      const delta = e.deltaY < 0 ? 0.05 : -0.05;
+      const current = settings.masterOpacity ?? 1.0;
+      const next = Math.round(Math.max(0.2, Math.min(1.0, current + delta)) * 100) / 100;
+      updateSettings({ masterOpacity: next });
+
+      setWheelOpacityHint(Math.round(next * 100));
+      if (wheelHintTimerRef.current !== null) {
+        window.clearTimeout(wheelHintTimerRef.current);
+      }
+      wheelHintTimerRef.current = window.setTimeout(() => {
+        setWheelOpacityHint(null);
+      }, 900);
+    },
+    [clickThroughLocked, settings.masterOpacity, updateSettings]
+  );
+
   // Automatically connect to output soundcard loopback on launch + init window position & system tray
   useEffect(() => {
     const engine = engineRef.current;
     if (!engine) return;
 
     engine.startAutoConnect();
-    engine.initWindowPositionMemory();
+    engine.getAutoStartEnabled().then(setAutoStartEnabled);
+
+    if (window.location.hash !== '#settings') {
+      engine.initWindowPositionMemory();
+      engine.syncSettingsAcrossWindows(loadSavedSettings());
+    }
 
     engine.subscribeToTrayCommands((cmd) => {
-      if (cmd === 'toggle-controls') {
-        setClickThroughLocked(false);
-        setHideControls((prev) => !prev);
-      } else if (cmd === 'show-controls') {
-        setClickThroughLocked(false);
-        setHideControls(false);
-      } else if (cmd === 'set-click-through:true') {
+      if (cmd === 'set-click-through:true') {
         setClickThroughLocked(true);
       } else if (cmd === 'set-click-through:false') {
         setClickThroughLocked(false);
+      } else if (cmd === 'auto-start-changed:true') {
+        setAutoStartEnabled(true);
+      } else if (cmd === 'auto-start-changed:false') {
+        setAutoStartEnabled(false);
       } else if (cmd.startsWith('set-theme:')) {
         const themeId = cmd.replace('set-theme:', '') as AuraThemeId;
         if (themeId in AURA_THEMES) {
@@ -201,28 +285,14 @@ export default function App() {
     settings.workLowPower30Fps,
   ]);
 
-  // Shortcut Alt + H toggles pure stealth mode & releases click-through lock when restoring UI
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.altKey && (e.key === 'h' || e.key === 'H')) {
-        e.preventDefault();
-        setHideControls((prev) => {
-          const next = !prev;
-          if (!next) {
-            toggleClickThrough(false);
-          }
-          return next;
-        });
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [toggleClickThrough]);
-
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (clickThroughLocked) return;
 
-    // In Tauri native desktop runtime, invoke native OS frameless window dragging & auto-persist position
+    // Ignore drag start if clicking the action buttons
+    if ((e.target as HTMLElement).closest('button')) {
+      return;
+    }
+
     if (engineRef.current?.isRunningInTauri()) {
       engineRef.current.startNativeWindowDrag();
       return;
@@ -258,276 +328,123 @@ export default function App() {
     }
   };
 
-  const isLight = settings.lightCanvasBg;
   const isTauri = engineRef.current?.isRunningInTauri() ?? false;
 
-  return (
-    <div
-      className={`min-h-screen w-full flex flex-col justify-between transition-colors duration-200 select-none overflow-hidden ${
-        isTauri
-          ? 'bg-transparent text-zinc-100'
-          : isLight
-          ? 'bg-[#F4F4F5] text-zinc-900'
-          : 'bg-[#09090B] text-zinc-100'
-      }`}
-    >
-      {/* Restore Micro-Tuning Bar Button when in Pure Stealth Mode */}
-      {hideControls && (
+  // 1. STANDALONE SETTINGS PAGE / WINDOW (#settings)
+  if (isSettingsRoute) {
+    return (
+      <SettingsPage
+        settings={settings}
+        telemetryRef={telemetryRef}
+        isSleepingState={isSleepingState}
+        clickThroughLocked={clickThroughLocked}
+        autoStartEnabled={autoStartEnabled}
+        isStandaloneWindow={isTauri}
+        onUpdateSettings={updateSettings}
+        onToggleClickThrough={toggleClickThrough}
+        onToggleAutoStart={handleToggleAutoStart}
+        onResetPosition={handleResetPosition}
+        onBackToBar={() => {
+          window.location.hash = '';
+          setIsSettingsRoute(false);
+        }}
+        onQuitApp={handleQuitApp}
+      />
+    );
+  }
+
+  if (isClosedInWebPreview) {
+    return (
+      <div className="min-h-screen w-full flex flex-col items-center justify-center gap-3 bg-transparent text-zinc-400 text-xs">
+        <span>隐身声学细线已关闭（在桌面 .exe 中会直接退出进程）</span>
         <button
           type="button"
-          onClick={() => {
-            setHideControls(false);
-            toggleClickThrough(false);
-          }}
-          title="展开微调栏并解除鼠标穿透 (Alt + H 或右键系统托盘)"
-          className={`fixed top-2.5 right-3 z-30 p-1.5 rounded-md opacity-10 hover:opacity-90 transition-opacity cursor-pointer ${
-            isLight ? 'text-zinc-700 hover:bg-zinc-200' : 'text-zinc-400 hover:bg-zinc-800'
-          }`}
+          onClick={() => setIsClosedInWebPreview(false)}
+          className="px-3 py-1.5 rounded-lg bg-zinc-800 text-zinc-200 hover:bg-zinc-700 cursor-pointer"
         >
-          <Eye className="w-3.5 h-3.5" />
+          重新唤醒细线
         </button>
-      )}
+      </div>
+    );
+  }
 
-      {/* CENTER STAGE: ONLY THE STEALTH ACOUSTIC FINE LINE (Supports Tauri OS Window Dragging + Position Memory) */}
-      <main
+  // 2. PURE DESKTOP BAR VIEW: ONLY THE SINGLE FINE LINE + GESTURES + HOVER GLOW ACTIONS
+  return (
+    <div
+      className="min-h-screen w-full flex items-center justify-center bg-transparent select-none overflow-hidden"
+      style={{ background: 'transparent' }}
+    >
+      <div
         data-tauri-drag-region
-        className="flex-1 flex flex-col items-center justify-center relative px-4"
-      >
-        <div
-          data-tauri-drag-region
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          style={{
-            transform: `translate3d(${dragOffset.x}px, ${dragOffset.y}px, 0)`,
-          }}
-          title={
-            clickThroughLocked
-              ? '已开启鼠标穿透锁定 (右键右下角系统托盘或按 Alt + H 解锁)'
-              : '按住可拖动隐身细线位置 (自动记忆坐标)'
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onWheel={handleWheelOpacity}
+        onDoubleClick={() => {
+          if (!clickThroughLocked) {
+            handleOpenSettings();
           }
-          className={`${
-            clickThroughLocked
-              ? 'pointer-events-none'
-              : 'cursor-grab active:cursor-grabbing'
-          } touch-none py-3 px-4`}
+        }}
+        style={{
+          transform: isTauri
+            ? undefined
+            : `translate3d(${dragOffset.x}px, ${dragOffset.y}px, 0)`,
+        }}
+        title={
+          clickThroughLocked
+            ? '已开启鼠标穿透锁定 (右键右下角系统托盘图标可解锁)'
+            : '按住拖动位置 · 滚轮调节透明度 · 双击打开设置'
+        }
+        className={`group relative flex items-center gap-2 py-2 px-3 ${
+          clickThroughLocked
+            ? 'pointer-events-none'
+            : 'cursor-grab active:cursor-grabbing'
+        } touch-none`}
+      >
+        {/* The Single Stealth Acoustic Fine Line with Master Opacity */}
+        <div
+          style={{ opacity: settings.masterOpacity ?? 1.0 }}
+          className="transition-opacity duration-150"
         >
           <MiniAuraWidget telemetryRef={telemetryRef} settings={settings} />
         </div>
-      </main>
 
-      {/* ULTRA-MINIMAL SINGLE-ROW TUNING BAR (Color Presets, Size Sliders, Auto-Sleep, Click-Through, Reset Pos) */}
-      {!hideControls && (
-        <footer
-          className={`px-5 py-2.5 border-t text-[11px] transition-opacity duration-200 opacity-35 hover:opacity-100 ${
-            isLight ? 'border-zinc-200/80 text-zinc-600' : 'border-zinc-800/50 text-zinc-400'
-          }`}
-        >
-          <div className="max-w-5xl mx-auto flex flex-wrap items-center justify-between gap-3">
-            {/* 1. Fluid Aura Color Presets */}
-            <div className="flex items-center gap-1.5">
-              <Palette className="w-3.5 h-3.5 opacity-70 shrink-0" />
-              <div className="flex items-center gap-1">
-                {(Object.keys(AURA_THEMES) as AuraThemeId[]).map((tKey) => {
-                  const palette = AURA_THEMES[tKey];
-                  const isSelected = settings.theme === tKey;
-                  return (
-                    <button
-                      key={tKey}
-                      type="button"
-                      onClick={() => updateSettings({ theme: tKey })}
-                      title={palette.desc}
-                      className={`px-2 py-0.5 rounded flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
-                        isSelected
-                          ? isLight
-                            ? 'bg-zinc-900 text-white font-medium'
-                            : 'bg-zinc-100 text-zinc-950 font-medium'
-                          : isLight
-                          ? 'hover:bg-zinc-200 text-zinc-700'
-                          : 'hover:bg-zinc-800/80 text-zinc-300'
-                      }`}
-                    >
-                      <span className="flex items-center -space-x-0.5">
-                        <span
-                          className="w-2 h-2 rounded-full"
-                          style={{ backgroundColor: `rgb(${palette.bassColor.join(',')})` }}
-                        />
-                        <span
-                          className="w-2 h-2 rounded-full"
-                          style={{ backgroundColor: `rgb(${palette.midColor.join(',')})` }}
-                        />
-                        <span
-                          className="w-2 h-2 rounded-full"
-                          style={{ backgroundColor: `rgb(${palette.trebleColor.join(',')})` }}
-                        />
-                      </span>
-                      <span>{palette.name}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
+        {/* Ephemeral Mouse Wheel Opacity Indicator */}
+        {wheelOpacityHint !== null && (
+          <span className="text-[10px] font-mono-tabular text-white/75 drop-shadow-[0_0_6px_rgba(255,255,255,0.5)]">
+            {wheelOpacityHint}%
+          </span>
+        )}
 
-            {/* 2. Fine Line Width & Thickness Micro-Sliders */}
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-1.5">
-                <span className="whitespace-nowrap opacity-75">长度</span>
-                <input
-                  type="range"
-                  min="160"
-                  max="640"
-                  step="10"
-                  value={settings.lineWidth}
-                  onChange={(e) =>
-                    updateSettings({ lineWidth: parseInt(e.target.value, 10) })
-                  }
-                  className="w-20 accent-zinc-400 cursor-pointer"
-                />
-                <span className="font-mono-tabular w-9">{settings.lineWidth}px</span>
-              </div>
+        {/* Subtle Hover Actions: Borderless & Background-Free with Soft White Glow */}
+        {!clickThroughLocked && (
+          <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-all duration-200 drop-shadow-[0_0_6px_rgba(255,255,255,0.35)]">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleOpenSettings();
+              }}
+              title="打开独立设置页面 (或双击细线)"
+              className="p-1 text-white/45 hover:text-white/95 hover:drop-shadow-[0_0_8px_rgba(255,255,255,0.75)] transition-all duration-150 cursor-pointer"
+            >
+              <Settings className="w-3 h-3" />
+            </button>
 
-              <div className="flex items-center gap-1.5">
-                <span className="whitespace-nowrap opacity-75">粗细</span>
-                <input
-                  type="range"
-                  min="4"
-                  max="16"
-                  step="1"
-                  value={settings.lineHeight}
-                  onChange={(e) =>
-                    updateSettings({ lineHeight: parseInt(e.target.value, 10) })
-                  }
-                  className="w-16 accent-zinc-400 cursor-pointer"
-                />
-                <span className="font-mono-tabular w-6">{settings.lineHeight}px</span>
-              </div>
-            </div>
-
-            {/* 3. Auto-Sleep CPU Power-Saving, Position Reset, Click-Through Lock & Stealth Toggle */}
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() =>
-                  updateSettings({ autoSleepEnabled: !settings.autoSleepEnabled })
-                }
-                className={`px-2 py-0.5 rounded flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
-                  settings.autoSleepEnabled
-                    ? isLight
-                      ? 'bg-zinc-800 text-white'
-                      : 'bg-zinc-200 text-zinc-950 font-medium'
-                    : isLight
-                    ? 'bg-zinc-200 text-zinc-600'
-                    : 'bg-zinc-800/70 text-zinc-400'
-                }`}
-              >
-                <Cpu className="w-3 h-3" />
-                <span>
-                  {isSleepingState
-                    ? '休眠中'
-                    : `自动休眠:${settings.autoSleepEnabled ? '开' : '关'}`}
-                </span>
-              </button>
-
-              {settings.autoSleepEnabled && (
-                <>
-                  <div className="flex items-center gap-0.5">
-                    {[5, 10, 30, 60].map((sec) => (
-                      <button
-                        key={sec}
-                        type="button"
-                        onClick={() => updateSettings({ autoSleepDelaySec: sec })}
-                        className={`px-1.5 py-0.5 rounded font-mono-tabular transition-colors cursor-pointer whitespace-nowrap ${
-                          settings.autoSleepDelaySec === sec
-                            ? isLight
-                              ? 'bg-zinc-300 text-zinc-900 font-semibold'
-                              : 'bg-zinc-700 text-white font-semibold'
-                            : 'opacity-60 hover:opacity-100'
-                        }`}
-                      >
-                        {sec}s
-                      </button>
-                    ))}
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      updateSettings({
-                        autoSleepBehavior:
-                          settings.autoSleepBehavior === 'freeze' ? 'low_fps' : 'freeze',
-                      })
-                    }
-                    className={`px-1.5 py-0.5 rounded font-mono-tabular transition-colors cursor-pointer whitespace-nowrap ${
-                      isLight ? 'hover:bg-zinc-200' : 'hover:bg-zinc-800'
-                    }`}
-                    title="切换休眠时的省电模式 (0FPS停止动画 / 2FPS极低帧率)"
-                  >
-                    {settings.autoSleepBehavior === 'freeze' ? '0FPS' : '2FPS'}
-                  </button>
-                </>
-              )}
-
-              <button
-                type="button"
-                onClick={handleResetPosition}
-                title="重置细线位置到屏幕中央/底部"
-                className={`p-1 rounded transition-colors cursor-pointer ${
-                  isLight ? 'hover:bg-zinc-200' : 'hover:bg-zinc-800'
-                }`}
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-              </button>
-
-              {!isTauri && (
-                <button
-                  type="button"
-                  onClick={() => updateSettings({ lightCanvasBg: !isLight })}
-                  title={isLight ? '切换纯黑底色' : '切换办公浅灰底色'}
-                  className={`p-1 rounded transition-colors cursor-pointer ${
-                    isLight ? 'hover:bg-zinc-200' : 'hover:bg-zinc-800'
-                  }`}
-                >
-                  {isLight ? <Moon className="w-3.5 h-3.5" /> : <Sun className="w-3.5 h-3.5" />}
-                </button>
-              )}
-
-              <button
-                type="button"
-                onClick={() => toggleClickThrough(!clickThroughLocked)}
-                title="开启/关闭桌面鼠标穿透锁定 (开启后可通过右下角系统托盘右键菜单或 Alt+H 解锁)"
-                className={`px-2 py-0.5 rounded flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
-                  clickThroughLocked
-                    ? isLight
-                      ? 'bg-zinc-800 text-white'
-                      : 'bg-zinc-200 text-zinc-950 font-medium'
-                    : isLight
-                    ? 'hover:bg-zinc-200'
-                    : 'hover:bg-zinc-800'
-                }`}
-              >
-                {clickThroughLocked ? (
-                  <Lock className="w-3 h-3" />
-                ) : (
-                  <Unlock className="w-3 h-3" />
-                )}
-                <span>{clickThroughLocked ? '已穿透' : '鼠标穿透'}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setHideControls(true)}
-                title="隐藏微调栏，仅留隐身细线 (Alt + H 或右键系统托盘)"
-                className={`px-2 py-0.5 rounded flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
-                  isLight ? 'hover:bg-zinc-200' : 'hover:bg-zinc-800'
-                }`}
-              >
-                <EyeOff className="w-3 h-3" />
-                <span>纯细线</span>
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleQuitApp();
+              }}
+              title="关闭并退出 AuraLine"
+              className="p-1 text-white/45 hover:text-white/95 hover:drop-shadow-[0_0_8px_rgba(255,255,255,0.75)] transition-all duration-150 cursor-pointer"
+            >
+              <X className="w-3 h-3" />
+            </button>
           </div>
-        </footer>
-      )}
+        )}
+      </div>
     </div>
   );
 }

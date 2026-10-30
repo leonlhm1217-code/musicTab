@@ -1,10 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { AudioTelemetry } from '../types/audio';
+import { AudioTelemetry, StealthLineSettings } from '../types/audio';
 
 const NOTE_STRINGS = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 const WINDOW_POS_STORAGE_KEY = 'auraline_window_pos_v1';
+const AUTO_START_FALLBACK_KEY = 'auraline_autostart_fallback_v1';
 
 export interface TauriTelemetryPayload {
   rmsVolume: number;
@@ -48,8 +49,10 @@ export class RealtimeAudioEngine {
   private silentSynthTimer: number | null = null;
   private unlistenTauri: UnlistenFn | null = null;
   private unlistenTray: UnlistenFn | null = null;
+  private unlistenSettings: UnlistenFn | null = null;
   private unlistenMoved: UnlistenFn | null = null;
   private latestNativePacket: TauriTelemetryPayload | null = null;
+  private lastNativePacketTimeMs = 0;
   private isTauriNative = false;
 
   private freqData: Uint8Array<ArrayBuffer> = new Uint8Array(new ArrayBuffer(1024));
@@ -69,6 +72,108 @@ export class RealtimeAudioEngine {
 
   public isRunningInTauri(): boolean {
     return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__);
+  }
+
+  /**
+   * Queries whether Windows HKCU startup auto-launch is enabled.
+   */
+  public async getAutoStartEnabled(): Promise<boolean> {
+    if (!this.isRunningInTauri()) {
+      return localStorage.getItem(AUTO_START_FALLBACK_KEY) === 'true';
+    }
+    try {
+      return await invoke<boolean>('get_auto_start_enabled');
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Enables or disables Windows HKCU startup auto-launch (no admin required).
+   */
+  public async setAutoStartEnabled(enabled: boolean): Promise<boolean> {
+    if (!this.isRunningInTauri()) {
+      try {
+        localStorage.setItem(AUTO_START_FALLBACK_KEY, String(enabled));
+      } catch {
+        // ignore
+      }
+      return enabled;
+    }
+    try {
+      return await invoke<boolean>('set_auto_start_enabled', { enabled });
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Opens the standalone native Settings window in Tauri `.exe` mode.
+   */
+  public async openNativeSettingsWindow(): Promise<boolean> {
+    if (!this.isRunningInTauri()) return false;
+    try {
+      await invoke('open_settings_window');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Immediately closes and exits the native `.exe` application.
+   */
+  public async quitNativeApp(): Promise<void> {
+    if (!this.isRunningInTauri()) return;
+    try {
+      await invoke('quit_app');
+    } catch {
+      try {
+        await getCurrentWindow().close();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /**
+   * Resizes the transparent main desktop window to fit the fine line width/height
+   * and broadcasts updated settings from the Settings window to the main desktop window.
+   */
+  public async syncSettingsAcrossWindows(settings: StealthLineSettings): Promise<void> {
+    if (!this.isRunningInTauri()) return;
+    try {
+      await invoke('resize_main_bar_window', {
+        lineWidth: settings.lineWidth,
+        lineHeight: settings.lineHeight,
+      });
+      await invoke('broadcast_settings', {
+        settingsJson: JSON.stringify(settings),
+      });
+    } catch {
+      // ignore in web preview
+    }
+  }
+
+  public async subscribeToSettingsBroadcast(
+    onSettingsUpdated: (settings: Partial<StealthLineSettings>) => void
+  ): Promise<void> {
+    if (!this.isRunningInTauri()) return;
+    try {
+      if (this.unlistenSettings) {
+        this.unlistenSettings();
+      }
+      this.unlistenSettings = await listen<string>('settings-updated', (event) => {
+        try {
+          const parsed = JSON.parse(event.payload) as Partial<StealthLineSettings>;
+          onSettingsUpdated(parsed);
+        } catch {
+          // ignore malformed payload
+        }
+      });
+    } catch {
+      // ignore in web preview
+    }
   }
 
   /**
@@ -124,7 +229,6 @@ export class RealtimeAudioEngine {
         localStorage.setItem(WINDOW_POS_STORAGE_KEY, JSON.stringify({ x, y }));
       }
 
-      // Listen for native OS window move events to persist position automatically
       const win = getCurrentWindow();
       this.unlistenMoved = await win.onMoved(({ payload }) => {
         try {
@@ -179,22 +283,17 @@ export class RealtimeAudioEngine {
   }
 
   /**
-   * Automatically connects to the sound card output on launch with ZERO microphone access:
-   * 1. In Tauri v2 Native `.exe`: Subscribes to Rust `cpal` `default_output_device()` WASAPI Loopback
-   *    stream (`"audio-telemetry"`). Microphones (`default_input_device`) are 100% physically untouched.
-   * 2. In Web Preview Fallback: Runs an internal zero-speaker-volume acoustic signal generator into
-   *    AnalyserNode (`navigator.mediaDevices.getUserMedia` is 100% removed so the browser never touches
-   *    or requests any microphone).
+   * Automatically connects to the sound card output on launch with ZERO microphone access.
    */
   public async startAutoConnect(): Promise<void> {
     this.stopAll();
 
-    // 1. Official @tauri-apps/api/event Native Soundcard Output Loopback Subscription
     if (this.isRunningInTauri()) {
       this.isTauriNative = true;
       try {
         this.unlistenTauri = await listen<TauriTelemetryPayload>('audio-telemetry', (event) => {
           this.latestNativePacket = event.payload;
+          this.lastNativePacketTimeMs = performance.now();
         });
         return;
       } catch {
@@ -204,6 +303,7 @@ export class RealtimeAudioEngine {
               'audio-telemetry',
               (event) => {
                 this.latestNativePacket = event.payload;
+                this.lastNativePacketTimeMs = performance.now();
               }
             );
             return;
@@ -214,7 +314,6 @@ export class RealtimeAudioEngine {
       }
     }
 
-    // 2. Web Preview Mode: 100% zero microphone calls; use internal silent-speaker synth for visual preview
     this.startInternalPreviewSignal();
   }
 
@@ -238,17 +337,12 @@ export class RealtimeAudioEngine {
     return this.ctx;
   }
 
-  /**
-   * Feeds a realistic 3-band musical signal into the AnalyserNode (with 0.0 speaker gain)
-   * when previewed in a browser environment without Tauri native WASAPI loopback.
-   */
   private startInternalPreviewSignal(): void {
     const ctx = this.ensureContext();
     const feedGain = ctx.createGain();
     feedGain.gain.value = 0.35;
     feedGain.connect(this.analyser!);
 
-    // Keep speaker output completely silent (0.0) in office preview while feeding AnalyserNode
     const muteOut = ctx.createGain();
     muteOut.gain.value = 0.0;
     this.analyser!.connect(muteOut);
@@ -266,7 +360,6 @@ export class RealtimeAudioEngine {
       const now = this.ctx.currentTime;
       const step = this.synthStep++;
 
-      // Low Band (Kick & Bass)
       if (step % 4 === 0 || step % 8 === 3 || step % 8 === 6) {
         const osc = this.ctx.createOscillator();
         const g = this.ctx.createGain();
@@ -293,7 +386,6 @@ export class RealtimeAudioEngine {
         bOsc.stop(now + 0.34);
       }
 
-      // Mid Band (Vocal/Piano Lead)
       if (step % 2 === 0 || step % 8 === 5) {
         const mOsc = this.ctx.createOscillator();
         const mG = this.ctx.createGain();
@@ -307,7 +399,6 @@ export class RealtimeAudioEngine {
         mOsc.stop(now + 0.4);
       }
 
-      // High Band (Strings/Hi-hat Harmonics)
       if (step % 2 === 1) {
         const hOsc = this.ctx.createOscillator();
         const hG = this.ctx.createGain();
@@ -335,6 +426,10 @@ export class RealtimeAudioEngine {
       this.unlistenTray();
       this.unlistenTray = null;
     }
+    if (this.unlistenSettings) {
+      this.unlistenSettings();
+      this.unlistenSettings = null;
+    }
     if (this.unlistenMoved) {
       this.unlistenMoved();
       this.unlistenMoved = null;
@@ -346,9 +441,6 @@ export class RealtimeAudioEngine {
     this.latestNativePacket = null;
   }
 
-  /**
-   * Real-time frame telemetry extraction for 60fps/30fps/Auto-Sleep Canvas & Spring Physics
-   */
   public sampleTelemetry(
     elasticIntensity = 1.0,
     autoSleepEnabled = true,
@@ -356,22 +448,50 @@ export class RealtimeAudioEngine {
   ): AudioTelemetry {
     const nowMs = performance.now();
 
-    // 1. Tauri v2 Rust WASAPI Output Loopback Native Stream
-    if (this.isTauriNative && this.latestNativePacket) {
-      const pkt = this.latestNativePacket;
-      const bassEnergy = Math.min(1, Math.max(0, pkt.bassEnergy ?? 0.02));
-      const midEnergy = Math.min(1, Math.max(0, pkt.midEnergy ?? 0.02));
-      const trebleEnergy = Math.min(1, Math.max(0, pkt.trebleEnergy ?? 0.01));
-      const rmsVolume = Math.min(1, Math.max(0, pkt.rmsVolume ?? 0.02));
-      const dbLevel = pkt.dbLevel ?? -60;
+    if (this.isTauriNative) {
+      const packetAgeMs = nowMs - this.lastNativePacketTimeMs;
+      const isStreamIdle = !this.latestNativePacket || packetAgeMs > 150;
 
-      if (rmsVolume >= 0.038) {
+      // Smoothly decay cached packet if Windows WASAPI paused callbacks (>150ms without audio callback)
+      if (isStreamIdle && this.latestNativePacket) {
+        this.latestNativePacket = {
+          ...this.latestNativePacket,
+          rmsVolume:
+            this.latestNativePacket.rmsVolume < 0.01
+              ? 0
+              : this.latestNativePacket.rmsVolume * 0.72,
+          bassEnergy:
+            this.latestNativePacket.bassEnergy < 0.01
+              ? 0
+              : this.latestNativePacket.bassEnergy * 0.72,
+          midEnergy:
+            this.latestNativePacket.midEnergy < 0.01
+              ? 0
+              : this.latestNativePacket.midEnergy * 0.72,
+          trebleEnergy:
+            this.latestNativePacket.trebleEnergy < 0.01
+              ? 0
+              : this.latestNativePacket.trebleEnergy * 0.72,
+          dbLevel: -60,
+          dominantPitchHz: 0,
+          isBeat: false,
+        };
+      }
+
+      const pkt = this.latestNativePacket;
+      const bassEnergy = Math.min(1, Math.max(0, pkt?.bassEnergy ?? 0));
+      const midEnergy = Math.min(1, Math.max(0, pkt?.midEnergy ?? 0));
+      const trebleEnergy = Math.min(1, Math.max(0, pkt?.trebleEnergy ?? 0));
+      const rmsVolume = Math.min(1, Math.max(0, pkt?.rmsVolume ?? 0));
+      const dbLevel = pkt?.dbLevel ?? -60;
+
+      if (rmsVolume >= 0.035 && !isStreamIdle) {
         this.silentStartMs = nowMs;
       }
       const silentDurationSec = Math.max(0, (nowMs - this.silentStartMs) / 1000);
       const isSleeping = autoSleepEnabled && silentDurationSec >= autoSleepDelaySec;
 
-      const dominantPitchHz = Math.round(pkt.dominantPitchHz ?? 0);
+      const dominantPitchHz = Math.round(pkt?.dominantPitchHz ?? 0);
       const noteName = frequencyToNoteName(dominantPitchHz);
       const pitchNormalized =
         dominantPitchHz > 70
@@ -383,7 +503,8 @@ export class RealtimeAudioEngine {
       if (this.beatCooldown > 0) this.beatCooldown--;
       const isBeat =
         !isSleeping &&
-        (pkt.isBeat || (bassDelta > 0.08 && bassEnergy > 0.2 && this.beatCooldown === 0));
+        !isStreamIdle &&
+        Boolean(pkt?.isBeat || (bassDelta > 0.08 && bassEnergy > 0.2 && this.beatCooldown === 0));
       if (isBeat) {
         this.beatCooldown = 8;
         this.springVelocity += Math.min(
@@ -409,12 +530,12 @@ export class RealtimeAudioEngine {
         springScale: this.springScale,
         springVelocity: this.springVelocity,
         waveformSlice:
-          pkt.waveformSlice && pkt.waveformSlice.length > 0
+          !isStreamIdle && pkt?.waveformSlice && pkt.waveformSlice.length > 0
             ? pkt.waveformSlice
             : new Array(48).fill(0),
         dominantInstrumentLabel: isSleeping
           ? '自动休眠省电中'
-          : pkt.deviceName
+          : pkt?.deviceName
           ? `声卡输出: ${pkt.deviceName}`
           : '声卡输出直连运行中',
         silentDurationSec,
@@ -422,7 +543,6 @@ export class RealtimeAudioEngine {
       };
     }
 
-    // 2. Web Audio AnalyserNode Path (Preview only, zero microphone access)
     if (!this.analyser || !this.ctx) {
       const silentDurationSec = Math.max(0, (nowMs - this.silentStartMs) / 1000);
       const isSleeping = autoSleepEnabled && silentDurationSec >= autoSleepDelaySec;

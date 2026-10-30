@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capabilities for AuraLine transparent desktop widget",
-  "windows": ["main"],
+  "description": "Default capabilities for AuraLine transparent desktop bar and settings window",
+  "windows": ["main", "settings"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
