@@ -16,9 +16,9 @@ import { RealtimeAudioEngine } from './services/audioEngine';
 import { MiniAuraWidget } from './components/MiniAuraWidget';
 import { SettingsPage } from './components/SettingsPage';
 import {
-  Chrome,
   Code2,
   FolderClosed,
+  Globe,
   MessageSquare,
   Minus,
   Music2,
@@ -532,13 +532,13 @@ export default function App() {
 
   // 2B. WEB PREVIEW VIEW: Windows 11 Centered Taskbar Simulation (Spectrum at Far-Left Edge + Centered Search & Icons)
   const simulatedIcons = [
-    { icon: Chrome, label: '浏览器' },
+    { icon: Globe, label: '浏览器' },
     { icon: FolderClosed, label: '资源管理器' },
     { icon: Music2, label: 'QQ音乐 (播放中)' },
     { icon: Code2, label: 'VS Code' },
     { icon: MessageSquare, label: '微信办公' },
     { icon: Terminal, label: '终端' },
-    { icon: Chrome, label: '文档中心' },
+    { icon: Globe, label: '文档中心' },
     { icon: FolderClosed, label: '项目归档' },
     { icon: Code2, label: '调试器' },
   ].slice(0, simAppCount);
