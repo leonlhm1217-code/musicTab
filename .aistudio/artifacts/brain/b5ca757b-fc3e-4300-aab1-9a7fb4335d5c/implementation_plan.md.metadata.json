@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan for the 4 final desktop optimizations: (1) WASAPI pause silence decay & heartbeat fix for Auto-Sleep, (2) 20%-100% Master Opacity slider in Settings, (3) Mouse wheel opacity tuning & double-click to open Settings on the fine line, and (4) Single-instance protection + Windows HKCU Startup auto-launch toggle in Tray & Settings.",
-  "updatedAt":  "2026-10-30T09:45:36.283504021Z",
+  "summary":  "基于 pbakaus/impeccable 设计框架与阿尔派/先锋黑金拉丝铝仪器风的重构计划：包含根目录 DESIGN.md 规范沉淀、设置面板去卡片化单层精密分割线重构、VFD 真空荧光屏频率刻度尺预览舱、支持双击复位的硬件级推子，以及 Web 预览顶栏去 AI 噪音打磨。",
+  "updatedAt":  "2026-10-30T12:03:10.135232003Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

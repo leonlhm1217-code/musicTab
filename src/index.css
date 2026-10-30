@@ -5,6 +5,14 @@
     --font-display: 'Outfit', 'PingFang SC', 'Microsoft YaHei', sans-serif;
     --font-sans: 'Plus Jakarta Sans', 'PingFang SC', 'Microsoft YaHei', sans-serif;
     --font-mono: 'JetBrains Mono', monospace;
+
+    --chassis-bg: #09090B;
+    --chassis-well: #0E0E12;
+    --vfd-glass: #040507;
+    --accent-gold: #D4AF37;
+    --accent-gold-bright: #E5C158;
+    --vfd-cyan: #00F5D4;
+    --vfd-amber: #F59E0B;
   }
 
   html,
@@ -13,9 +21,10 @@
     font-family: var(--font-sans);
     background: transparent !important;
     background-color: transparent !important;
-    color: #F1F5F9;
+    color: #F4F4F6;
     margin: 0;
     padding: 0;
+    -webkit-font-smoothing: antialiased;
   }
 
   h1, h2, h3, .font-display {
@@ -26,4 +35,98 @@
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
+}
+
+/* Anodized Brushed Aluminum Console Chassis */
+.anodized-chassis {
+  background-color: var(--chassis-bg);
+  background-image:
+    repeating-linear-gradient(
+      0deg,
+      rgba(255, 255, 255, 0.012) 0px,
+      rgba(255, 255, 255, 0.012) 1px,
+      transparent 1px,
+      transparent 3px
+    ),
+    radial-gradient(circle at 50% 0%, rgba(212, 175, 55, 0.045), transparent 65%);
+}
+
+/* Recessed Smoked Acrylic VFD Display Bay */
+.vfd-display-bay {
+  background-color: var(--vfd-glass);
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.014) 1px, transparent 1px);
+  background-size: 100% 3px, 12px 100%;
+  box-shadow:
+    inset 0 2px 10px rgba(0, 0, 0, 0.85),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* Alpine / Pioneer Champagne-Gold Hardware Fader */
+input[type="range"].hardware-fader {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  height: 20px;
+}
+
+input[type="range"].hardware-fader::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 1px;
+  background: #18181D;
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.9),
+    0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+input[type="range"].hardware-fader::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 16px;
+  margin-top: -6px;
+  border-radius: 1.5px;
+  background: linear-gradient(180deg, #F3D77D 0%, #D4AF37 52%, #9A7B1C 100%);
+  border: 1px solid rgba(255, 248, 220, 0.45);
+  box-shadow:
+    0 1px 4px rgba(0, 0, 0, 0.8),
+    0 0 8px rgba(212, 175, 55, 0.25);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+input[type="range"].hardware-fader:hover::-webkit-slider-thumb {
+  transform: scaleY(1.08);
+  box-shadow:
+    0 1px 5px rgba(0, 0, 0, 0.9),
+    0 0 12px rgba(229, 193, 88, 0.45);
+}
+
+input[type="range"].hardware-fader:focus-visible {
+  outline: none;
+}
+
+input[type="range"].hardware-fader:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid #E5C158;
+  outline-offset: 2px;
+}
+
+input[type="range"].hardware-fader::-moz-range-track {
+  height: 4px;
+  border-radius: 1px;
+  background: #18181D;
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.9),
+    0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+input[type="range"].hardware-fader::-moz-range-thumb {
+  width: 10px;
+  height: 16px;
+  border-radius: 1.5px;
+  background: linear-gradient(180deg, #F3D77D 0%, #D4AF37 52%, #9A7B1C 100%);
+  border: 1px solid rgba(255, 248, 220, 0.45);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
 }

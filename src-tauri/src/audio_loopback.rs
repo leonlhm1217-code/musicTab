@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
 const FFT_SIZE: usize = 1024;
+const NUM_SPECTRUM_BANDS: usize = 32;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +24,7 @@ pub struct AudioTelemetryPayload {
     pub dominant_pitch_hz: u32,
     pub is_beat: bool,
     pub waveform_slice: Vec<f32>,
+    pub spectrum_bands: Vec<f32>,
     pub device_name: String,
 }
 
@@ -37,6 +39,7 @@ impl AudioTelemetryPayload {
             dominant_pitch_hz: 0,
             is_beat: false,
             waveform_slice: vec![0.0; 48],
+            spectrum_bands: vec![0.0; NUM_SPECTRUM_BANDS],
             device_name: device_name.to_string(),
         }
     }
@@ -55,6 +58,7 @@ struct DspState {
     prev_bass: f32,
     beat_cooldown: u32,
     smooth_pitch: f32,
+    smoothed_bands: [f32; NUM_SPECTRUM_BANDS],
 }
 
 impl DspState {
@@ -69,6 +73,7 @@ impl DspState {
             prev_bass: 0.0,
             beat_cooldown: 0,
             smooth_pitch: 0.0,
+            smoothed_bands: [0.0; NUM_SPECTRUM_BANDS],
         }
     }
 
@@ -77,6 +82,7 @@ impl DspState {
         self.prev_bass = 0.0;
         self.beat_cooldown = 0;
         self.smooth_pitch = 0.0;
+        self.smoothed_bands = [0.0; NUM_SPECTRUM_BANDS];
     }
 
     fn process_block(
@@ -128,9 +134,11 @@ impl DspState {
         let mut max_mag = 0.0_f32;
         let mut max_bin = 0_usize;
 
+        let mut magnitudes = vec![0.0_f32; half_bins];
         for i in 1..half_bins {
             let freq = (i as f32) * hz_per_bin;
             let mag = buffer[i].norm() / norm_factor;
+            magnitudes[i] = mag;
 
             if (20.0..=250.0).contains(&freq) {
                 low_sum += mag;
@@ -147,6 +155,47 @@ impl DspState {
                 max_mag = mag;
                 max_bin = i;
             }
+        }
+
+        // 3. Extract 32 Logarithmic Frequency Bands (32 Hz to 16,000 Hz) with Car Stereo Equalizer Tilt
+        let min_f = 32.0_f32;
+        let max_f = 16000.0_f32;
+        let ratio = max_f / min_f;
+        let mut spectrum_bands = Vec::with_capacity(NUM_SPECTRUM_BANDS);
+
+        for b in 0..NUM_SPECTRUM_BANDS {
+            let t0 = (b as f32) / (NUM_SPECTRUM_BANDS as f32);
+            let t1 = ((b + 1) as f32) / (NUM_SPECTRUM_BANDS as f32);
+            let f0 = min_f * ratio.powf(t0);
+            let f1 = min_f * ratio.powf(t1);
+
+            let idx0 = ((f0 / hz_per_bin).floor() as usize).clamp(1, half_bins - 1);
+            let idx1 = ((f1 / hz_per_bin).ceil() as usize).clamp(idx0, half_bins - 1);
+
+            let mut band_peak = 0.0_f32;
+            let mut band_sum = 0.0_f32;
+            let count = (idx1 - idx0 + 1).max(1) as f32;
+            for &m in &magnitudes[idx0..=idx1] {
+                if m > band_peak {
+                    band_peak = m;
+                }
+                band_sum += m;
+            }
+            let band_avg = (band_peak * 0.65) + (band_sum / count) * 0.35;
+
+            // Perceptual loudness tilt so mid/high frequencies dance as vividly as bass drums
+            let freq_tilt = 16.0 + (b as f32) * 3.1;
+            let raw_val = (band_avg * freq_tilt).powf(0.75).clamp(0.0, 1.0);
+
+            // Fast attack (0.72), crisp automotive VFD decay (0.58)
+            let prev = self.smoothed_bands[b];
+            let next = if raw_val > prev {
+                prev * 0.28 + raw_val * 0.72
+            } else {
+                prev * 0.58 + raw_val * 0.42
+            };
+            self.smoothed_bands[b] = if next < 0.015 { 0.0 } else { next };
+            spectrum_bands.push(self.smoothed_bands[b]);
         }
 
         let bass_energy = if low_cnt > 0 {
@@ -173,7 +222,7 @@ impl DspState {
             -60
         };
 
-        // 3. Dominant Pitch (Hz) estimation
+        // 4. Dominant Pitch (Hz) estimation
         if max_mag > 0.004 {
             let raw_pitch = (max_bin as f32) * hz_per_bin;
             self.smooth_pitch = if self.smooth_pitch == 0.0 {
@@ -190,7 +239,7 @@ impl DspState {
             0
         };
 
-        // 4. Onset Beat Detection
+        // 5. Onset Beat Detection
         let bass_delta = bass_energy - self.prev_bass;
         self.prev_bass = bass_energy * 0.65 + self.prev_bass * 0.35;
         if self.beat_cooldown > 0 {
@@ -210,6 +259,7 @@ impl DspState {
             dominant_pitch_hz,
             is_beat,
             waveform_slice,
+            spectrum_bands,
             device_name: device_name.to_string(),
         }
     }
@@ -232,9 +282,6 @@ fn select_output_only_loopback_device(
     None
 }
 
-/// Spawns a persistent background Rust watchdog thread that binds ONLY to the default
-/// speaker/headphone output loopback (WASAPI Loopback on Windows), emits silence heartbeats
-/// when Windows pauses WASAPI callbacks on music pause, and seamlessly reconnects on device switch.
 pub fn spawn_soundcard_loopback(app: AppHandle) {
     std::thread::spawn(move || {
         let state = Arc::new(Mutex::new(DspState::new()));
@@ -356,10 +403,6 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
                     let mut tick_count = 0u32;
                     let mut was_silent_idle = false;
 
-                    // 100ms precision watchdog:
-                    // 1. Detects when Windows WASAPI pauses callbacks during music pause (>140ms idle)
-                    //    and emits explicit zero-silence telemetry so the bar returns to calm & auto-sleeps.
-                    // 2. Checks every 2s for stream error or default output device hot-swap.
                     loop {
                         std::thread::sleep(Duration::from_millis(100));
                         tick_count = tick_count.wrapping_add(1);
@@ -385,7 +428,6 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
                             was_silent_idle = false;
                         }
 
-                        // Every 2 seconds (20 ticks), check if default output device changed
                         if tick_count % 20 == 0 {
                             if let Some(current_out) = host.default_output_device() {
                                 if let Ok(current_name) = current_out.name() {

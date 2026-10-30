@@ -1,11 +1,12 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { AudioTelemetry, StealthLineSettings } from '../types/audio';
+import { AudioTelemetry, StealthLineSettings, TaskbarSlotTelemetry } from '../types/audio';
 
 const NOTE_STRINGS = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 const WINDOW_POS_STORAGE_KEY = 'auraline_window_pos_v1';
 const AUTO_START_FALLBACK_KEY = 'auraline_autostart_fallback_v1';
+const NUM_SPECTRUM_BANDS = 32;
 
 export interface TauriTelemetryPayload {
   rmsVolume: number;
@@ -16,6 +17,7 @@ export interface TauriTelemetryPayload {
   dominantPitchHz: number;
   isBeat: boolean;
   waveformSlice: number[];
+  spectrumBands?: number[];
   deviceName?: string;
 }
 
@@ -50,13 +52,16 @@ export class RealtimeAudioEngine {
   private unlistenTauri: UnlistenFn | null = null;
   private unlistenTray: UnlistenFn | null = null;
   private unlistenSettings: UnlistenFn | null = null;
+  private unlistenTaskbar: UnlistenFn | null = null;
   private unlistenMoved: UnlistenFn | null = null;
   private latestNativePacket: TauriTelemetryPayload | null = null;
   private lastNativePacketTimeMs = 0;
   private isTauriNative = false;
+  private currentDockMode = 'left_edge';
 
   private freqData: Uint8Array<ArrayBuffer> = new Uint8Array(new ArrayBuffer(1024));
   private timeData: Uint8Array<ArrayBuffer> = new Uint8Array(new ArrayBuffer(1024));
+  private smoothedBands: number[] = new Array(NUM_SPECTRUM_BANDS).fill(0);
 
   private prevBassEnergy = 0;
   private beatCooldown = 0;
@@ -74,9 +79,6 @@ export class RealtimeAudioEngine {
     return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__);
   }
 
-  /**
-   * Queries whether Windows HKCU startup auto-launch is enabled.
-   */
   public async getAutoStartEnabled(): Promise<boolean> {
     if (!this.isRunningInTauri()) {
       return localStorage.getItem(AUTO_START_FALLBACK_KEY) === 'true';
@@ -88,9 +90,6 @@ export class RealtimeAudioEngine {
     }
   }
 
-  /**
-   * Enables or disables Windows HKCU startup auto-launch (no admin required).
-   */
   public async setAutoStartEnabled(enabled: boolean): Promise<boolean> {
     if (!this.isRunningInTauri()) {
       try {
@@ -107,9 +106,6 @@ export class RealtimeAudioEngine {
     }
   }
 
-  /**
-   * Opens the standalone native Settings window in Tauri `.exe` mode.
-   */
   public async openNativeSettingsWindow(): Promise<boolean> {
     if (!this.isRunningInTauri()) return false;
     try {
@@ -120,9 +116,6 @@ export class RealtimeAudioEngine {
     }
   }
 
-  /**
-   * Immediately closes and exits the native `.exe` application.
-   */
   public async quitNativeApp(): Promise<void> {
     if (!this.isRunningInTauri()) return;
     try {
@@ -136,17 +129,23 @@ export class RealtimeAudioEngine {
     }
   }
 
-  /**
-   * Resizes the transparent main desktop window to fit the fine line width/height
-   * and broadcasts updated settings from the Settings window to the main desktop window.
-   */
   public async syncSettingsAcrossWindows(settings: StealthLineSettings): Promise<void> {
+    this.currentDockMode = settings.taskbarDockMode ?? 'left_edge';
     if (!this.isRunningInTauri()) return;
     try {
-      await invoke('resize_main_bar_window', {
-        lineWidth: settings.lineWidth,
-        lineHeight: settings.lineHeight,
+      await invoke('update_taskbar_config', {
+        dockMode: this.currentDockMode,
+        offsetX: settings.taskbarOffsetX ?? 0,
+        desiredWidth: settings.lineWidth,
+        desiredHeight: settings.lineHeight,
+        preferredBands: settings.preferredBands ?? 24,
       });
+      if (this.currentDockMode === 'manual') {
+        await invoke('resize_main_bar_window', {
+          lineWidth: settings.lineWidth,
+          lineHeight: settings.lineHeight,
+        });
+      }
       await invoke('broadcast_settings', {
         settingsJson: JSON.stringify(settings),
       });
@@ -157,29 +156,63 @@ export class RealtimeAudioEngine {
 
   public async subscribeToSettingsBroadcast(
     onSettingsUpdated: (settings: Partial<StealthLineSettings>) => void
-  ): Promise<void> {
-    if (!this.isRunningInTauri()) return;
+  ): Promise<() => void> {
+    if (!this.isRunningInTauri()) return () => {};
     try {
       if (this.unlistenSettings) {
         this.unlistenSettings();
+        this.unlistenSettings = null;
       }
-      this.unlistenSettings = await listen<string>('settings-updated', (event) => {
+      const unlisten = await listen<string>('settings-updated', (event) => {
         try {
           const parsed = JSON.parse(event.payload) as Partial<StealthLineSettings>;
+          if (parsed.taskbarDockMode) {
+            this.currentDockMode = parsed.taskbarDockMode;
+          }
           onSettingsUpdated(parsed);
         } catch {
           // ignore malformed payload
         }
       });
+      this.unlistenSettings = unlisten;
+      return () => {
+        unlisten();
+        if (this.unlistenSettings === unlisten) {
+          this.unlistenSettings = null;
+        }
+      };
     } catch {
-      // ignore in web preview
+      return () => {};
     }
   }
 
-  /**
-   * Invokes the Rust native command `set_click_through` via @tauri-apps/api/core
-   * so mouse clicks pass directly through the transparent window to desktop apps behind it.
-   */
+  public async subscribeToTaskbarSlot(
+    onSlotUpdated: (slot: TaskbarSlotTelemetry) => void
+  ): Promise<() => void> {
+    if (!this.isRunningInTauri()) return () => {};
+    try {
+      if (this.unlistenTaskbar) {
+        this.unlistenTaskbar();
+        this.unlistenTaskbar = null;
+      }
+      const unlisten = await listen<TaskbarSlotTelemetry>(
+        'taskbar-slot-updated',
+        (event) => {
+          onSlotUpdated(event.payload);
+        }
+      );
+      this.unlistenTaskbar = unlisten;
+      return () => {
+        unlisten();
+        if (this.unlistenTaskbar === unlisten) {
+          this.unlistenTaskbar = null;
+        }
+      };
+    } catch {
+      return () => {};
+    }
+  }
+
   public async setNativeClickThrough(ignore: boolean): Promise<void> {
     if (!this.isRunningInTauri()) return;
     try {
@@ -193,10 +226,6 @@ export class RealtimeAudioEngine {
     }
   }
 
-  /**
-   * Starts native frameless OS window dragging via @tauri-apps/api/window or Rust command,
-   * and persists the final screen coordinates after dragging completes.
-   */
   public async startNativeWindowDrag(): Promise<void> {
     if (!this.isRunningInTauri()) return;
     try {
@@ -211,26 +240,32 @@ export class RealtimeAudioEngine {
     await this.saveCurrentWindowPosition();
   }
 
-  /**
-   * Restores the saved desktop screen position (X, Y) on `.exe` launch,
-   * or docks the stealth fine line at the bottom center of the primary screen on first launch.
-   */
-  public async initWindowPositionMemory(): Promise<void> {
+  public async initWindowPositionMemory(initialDockMode = 'left_edge'): Promise<void> {
+    this.currentDockMode = initialDockMode;
     if (!this.isRunningInTauri()) return;
     try {
-      const raw = localStorage.getItem(WINDOW_POS_STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as { x: number; y: number };
-        if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
-          await invoke('set_window_position', { x: parsed.x, y: parsed.y });
+      // Only restore manual x/y coordinates when explicitly in 'manual' free-drag mode.
+      // When in 'left_edge' (or other auto taskbar dock modes), let taskbar_layout.rs position the window directly.
+      if (this.currentDockMode === 'manual') {
+        const raw = localStorage.getItem(WINDOW_POS_STORAGE_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw) as { x: number; y: number };
+          if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
+            await invoke('set_window_position', { x: parsed.x, y: parsed.y });
+          }
         }
-      } else {
-        const [x, y] = await invoke<[number, number]>('reset_window_to_bottom_center');
-        localStorage.setItem(WINDOW_POS_STORAGE_KEY, JSON.stringify({ x, y }));
+      }
+
+      if (this.unlistenMoved) {
+        this.unlistenMoved();
+        this.unlistenMoved = null;
       }
 
       const win = getCurrentWindow();
       this.unlistenMoved = await win.onMoved(({ payload }) => {
+        if (this.currentDockMode !== 'manual') {
+          return;
+        }
         try {
           localStorage.setItem(
             WINDOW_POS_STORAGE_KEY,
@@ -265,28 +300,44 @@ export class RealtimeAudioEngine {
     }
   }
 
-  /**
-   * Subscribes to native Windows System Tray right-click menu actions emitted by Rust.
-   */
-  public async subscribeToTrayCommands(onCommand: (cmd: string) => void): Promise<void> {
-    if (!this.isRunningInTauri()) return;
+  public async subscribeToTrayCommands(
+    onCommand: (cmd: string) => void
+  ): Promise<() => void> {
+    if (!this.isRunningInTauri()) return () => {};
     try {
       if (this.unlistenTray) {
         this.unlistenTray();
+        this.unlistenTray = null;
       }
-      this.unlistenTray = await listen<string>('tray-command', (event) => {
+      const unlisten = await listen<string>('tray-command', (event) => {
         onCommand(event.payload);
       });
+      this.unlistenTray = unlisten;
+      return () => {
+        unlisten();
+        if (this.unlistenTray === unlisten) {
+          this.unlistenTray = null;
+        }
+      };
     } catch {
-      // ignore in web preview
+      return () => {};
     }
   }
 
-  /**
-   * Automatically connects to the sound card output on launch with ZERO microphone access.
-   */
+  public stopAudioStream(): void {
+    if (this.unlistenTauri) {
+      this.unlistenTauri();
+      this.unlistenTauri = null;
+    }
+    if (this.silentSynthTimer !== null) {
+      window.clearInterval(this.silentSynthTimer);
+      this.silentSynthTimer = null;
+    }
+    this.latestNativePacket = null;
+  }
+
   public async startAutoConnect(): Promise<void> {
-    this.stopAll();
+    this.stopAudioStream();
 
     if (this.isRunningInTauri()) {
       this.isTauriNative = true;
@@ -330,7 +381,7 @@ export class RealtimeAudioEngine {
     if (!this.analyser) {
       this.analyser = this.ctx.createAnalyser();
       this.analyser.fftSize = 2048;
-      this.analyser.smoothingTimeConstant = 0.78;
+      this.analyser.smoothingTimeConstant = 0.72;
       this.freqData = new Uint8Array(new ArrayBuffer(this.analyser.frequencyBinCount));
       this.timeData = new Uint8Array(new ArrayBuffer(this.analyser.frequencyBinCount));
     }
@@ -348,9 +399,9 @@ export class RealtimeAudioEngine {
     this.analyser!.connect(muteOut);
     muteOut.connect(ctx.destination);
 
-    const bassNotes = [65.41, 65.41, 87.31, 87.31, 110.0, 98.0, 73.42, 82.41];
-    const midNotes = [261.63, 329.63, 392.0, 523.25, 440.0, 392.0, 349.23, 329.63];
-    const highNotes = [2637.02, 3135.96, 3520.0, 4186.01];
+    const bassNotes = [55.0, 65.41, 82.41, 98.0, 110.0, 73.42, 65.41, 87.31];
+    const midNotes = [261.63, 329.63, 392.0, 523.25, 659.25, 440.0, 349.23, 293.66];
+    const highNotes = [1760.0, 2637.02, 3520.0, 5274.0, 7040.0, 10548.0];
 
     const stepFn = () => {
       if (!this.ctx) return;
@@ -360,61 +411,62 @@ export class RealtimeAudioEngine {
       const now = this.ctx.currentTime;
       const step = this.synthStep++;
 
+      // Sub-bass & Kick drum (32Hz - 140Hz)
       if (step % 4 === 0 || step % 8 === 3 || step % 8 === 6) {
         const osc = this.ctx.createOscillator();
         const g = this.ctx.createGain();
-        osc.frequency.setValueAtTime(130, now);
-        osc.frequency.exponentialRampToValueAtTime(48, now + 0.14);
-        g.gain.setValueAtTime(0.85, now);
-        g.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+        osc.frequency.setValueAtTime(140, now);
+        osc.frequency.exponentialRampToValueAtTime(42, now + 0.14);
+        g.gain.setValueAtTime(0.88, now);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
         osc.connect(g);
         g.connect(feedGain);
         osc.start(now);
-        osc.stop(now + 0.27);
+        osc.stop(now + 0.25);
       }
 
       if (step % 2 === 0) {
         const bOsc = this.ctx.createOscillator();
         const bG = this.ctx.createGain();
-        bOsc.type = 'triangle';
-        bOsc.frequency.setValueAtTime(bassNotes[Math.floor(step / 4) % bassNotes.length], now);
-        bG.gain.setValueAtTime(0.42, now);
-        bG.gain.exponentialRampToValueAtTime(0.01, now + 0.32);
+        bOsc.type = 'sawtooth';
+        bOsc.frequency.setValueAtTime(bassNotes[Math.floor(step / 2) % bassNotes.length], now);
+        bG.gain.setValueAtTime(0.32, now);
+        bG.gain.exponentialRampToValueAtTime(0.008, now + 0.3);
         bOsc.connect(bG);
         bG.connect(feedGain);
         bOsc.start(now);
-        bOsc.stop(now + 0.34);
+        bOsc.stop(now + 0.32);
       }
 
+      // Vocals / Synth Chord (250Hz - 2.5kHz)
       if (step % 2 === 0 || step % 8 === 5) {
         const mOsc = this.ctx.createOscillator();
         const mG = this.ctx.createGain();
-        mOsc.type = 'sine';
+        mOsc.type = 'triangle';
         mOsc.frequency.setValueAtTime(midNotes[step % midNotes.length], now);
         mG.gain.setValueAtTime(0.36, now);
-        mG.gain.exponentialRampToValueAtTime(0.008, now + 0.38);
+        mG.gain.exponentialRampToValueAtTime(0.008, now + 0.36);
         mOsc.connect(mG);
         mG.connect(feedGain);
         mOsc.start(now);
-        mOsc.stop(now + 0.4);
+        mOsc.stop(now + 0.38);
       }
 
-      if (step % 2 === 1) {
-        const hOsc = this.ctx.createOscillator();
-        const hG = this.ctx.createGain();
-        hOsc.type = 'sine';
-        hOsc.frequency.setValueAtTime(highNotes[step % highNotes.length], now);
-        hG.gain.setValueAtTime(0.22, now);
-        hG.gain.exponentialRampToValueAtTime(0.002, now + 0.16);
-        hOsc.connect(hG);
-        hG.connect(feedGain);
-        hOsc.start(now);
-        hOsc.stop(now + 0.17);
-      }
+      // Hi-Hat / Cymbal Harmonics (2kHz - 12kHz)
+      const hOsc = this.ctx.createOscillator();
+      const hG = this.ctx.createGain();
+      hOsc.type = 'sine';
+      hOsc.frequency.setValueAtTime(highNotes[step % highNotes.length], now);
+      hG.gain.setValueAtTime(step % 2 === 1 ? 0.24 : 0.12, now);
+      hG.gain.exponentialRampToValueAtTime(0.002, now + 0.14);
+      hOsc.connect(hG);
+      hG.connect(feedGain);
+      hOsc.start(now);
+      hOsc.stop(now + 0.15);
     };
 
     stepFn();
-    this.silentSynthTimer = window.setInterval(stepFn, 220);
+    this.silentSynthTimer = window.setInterval(stepFn, 190);
   }
 
   public stopAll(): void {
@@ -429,6 +481,10 @@ export class RealtimeAudioEngine {
     if (this.unlistenSettings) {
       this.unlistenSettings();
       this.unlistenSettings = null;
+    }
+    if (this.unlistenTaskbar) {
+      this.unlistenTaskbar();
+      this.unlistenTaskbar = null;
     }
     if (this.unlistenMoved) {
       this.unlistenMoved();
@@ -452,8 +508,8 @@ export class RealtimeAudioEngine {
       const packetAgeMs = nowMs - this.lastNativePacketTimeMs;
       const isStreamIdle = !this.latestNativePacket || packetAgeMs > 150;
 
-      // Smoothly decay cached packet if Windows WASAPI paused callbacks (>150ms without audio callback)
       if (isStreamIdle && this.latestNativePacket) {
+        const prevBands = this.latestNativePacket.spectrumBands ?? new Array(NUM_SPECTRUM_BANDS).fill(0);
         this.latestNativePacket = {
           ...this.latestNativePacket,
           rmsVolume:
@@ -472,6 +528,7 @@ export class RealtimeAudioEngine {
             this.latestNativePacket.trebleEnergy < 0.01
               ? 0
               : this.latestNativePacket.trebleEnergy * 0.72,
+          spectrumBands: prevBands.map((v) => (v < 0.015 ? 0 : v * 0.68)),
           dbLevel: -60,
           dominantPitchHz: 0,
           isBeat: false,
@@ -533,6 +590,10 @@ export class RealtimeAudioEngine {
           !isStreamIdle && pkt?.waveformSlice && pkt.waveformSlice.length > 0
             ? pkt.waveformSlice
             : new Array(48).fill(0),
+        spectrumBands:
+          pkt?.spectrumBands && pkt.spectrumBands.length === NUM_SPECTRUM_BANDS
+            ? pkt.spectrumBands
+            : new Array(NUM_SPECTRUM_BANDS).fill(0),
         dominantInstrumentLabel: isSleeping
           ? '自动休眠省电中'
           : pkt?.deviceName
@@ -559,6 +620,7 @@ export class RealtimeAudioEngine {
         springScale: 1.0,
         springVelocity: 0,
         waveformSlice: new Array(48).fill(0),
+        spectrumBands: new Array(NUM_SPECTRUM_BANDS).fill(0),
         dominantInstrumentLabel: isSleeping ? '自动休眠省电中' : '声卡输出静默监听中',
         silentDurationSec,
         isSleeping,
@@ -597,6 +659,34 @@ export class RealtimeAudioEngine {
         maxBinVal = val;
         maxBinIdx = i;
       }
+    }
+
+    // Compute 32 Logarithmic Frequency Bands (32 Hz to 16 kHz)
+    const minF = 32;
+    const maxF = 16000;
+    const ratio = maxF / minF;
+    const spectrumBands: number[] = new Array(NUM_SPECTRUM_BANDS);
+
+    for (let b = 0; b < NUM_SPECTRUM_BANDS; b++) {
+      const f0 = minF * Math.pow(ratio, b / NUM_SPECTRUM_BANDS);
+      const f1 = minF * Math.pow(ratio, (b + 1) / NUM_SPECTRUM_BANDS);
+      const idx0 = Math.max(1, Math.min(binCount - 1, Math.floor(f0 / hzPerBin)));
+      const idx1 = Math.max(idx0, Math.min(binCount - 1, Math.ceil(f1 / hzPerBin)));
+
+      let peak = 0;
+      let sum = 0;
+      for (let i = idx0; i <= idx1; i++) {
+        const v = this.freqData[i] / 255;
+        if (v > peak) peak = v;
+        sum += v;
+      }
+      const avg = peak * 0.65 + (sum / Math.max(1, idx1 - idx0 + 1)) * 0.35;
+      const tilt = 1.0 + (b / NUM_SPECTRUM_BANDS) * 0.95;
+      const rawVal = Math.min(1, Math.pow(avg * tilt, 0.85));
+      const prev = this.smoothedBands[b] || 0;
+      const next = rawVal > prev ? prev * 0.25 + rawVal * 0.75 : prev * 0.6 + rawVal * 0.4;
+      this.smoothedBands[b] = next < 0.015 ? 0 : next;
+      spectrumBands[b] = this.smoothedBands[b];
     }
 
     const lowCount = Math.max(1, lowEnd - lowStart + 1);
@@ -675,6 +765,7 @@ export class RealtimeAudioEngine {
       springScale: this.springScale,
       springVelocity: this.springVelocity,
       waveformSlice,
+      spectrumBands,
       dominantInstrumentLabel: isSleeping ? '自动休眠省电中' : '声卡输出直连运行中',
       silentDurationSec,
       isSleeping,

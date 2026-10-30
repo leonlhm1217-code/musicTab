@@ -1,76 +1,46 @@
-# AuraLine — 桌面体验与声卡底层四项终极优化方案
+# AuraLine — Impeccable 设计重构实施计划（Pioneer / Alpine 黑金拉丝铝仪器风）
 
-本方案将您确认的四项优化全部整合进 `AuraLine-Portable.exe`，消除 Windows 暂停播放时的尾音残留问题，并补齐办公隐蔽度调节、鼠标手势、防多开保护与开机自启能力。
-
----
-
-## User Review & Critical Decisions
-
-> [!IMPORTANT]
-> 本次升级包含您勾选确认的全部 4 项核心优化：
-
-- **Confirmed Decision 1（修复暂停音乐时 WASAPI 停止回调导致光晕不归零与不休眠）**：
-  - 在 Rust 声卡线程与前端声学引擎中同时引入 **`140ms` 断流静音心跳与平滑衰减机制**：当 QQ 音乐暂停播放、Windows WASAPI 停止触发音频回调时，细线光晕在 `0.15 秒` 内丝滑回落至静默态（`-60dB`），并准时触发 `0 FPS` 自动休眠。
-- **Confirmed Decision 2（新增 20%–100% 整体透明度调节）**：
-  - 在独立设置窗口中新增 **“整体不透明度 (20%–100%)”** 滑块，可随时将桌面细线调至极淡的半透明状态（如 `30%`），兼顾办公室白天的极致隐蔽性。
-- **Confirmed Decision 3（细线手势交互：滚轮调透明度 + 双击打开设置）**：
-  - **鼠标滚轮**：将鼠标移到细线上滚动滚轮，即可直接以 `±5%` 步进实时调节细线整体透明度。
-  - **鼠标双击**：双击细线任意位置，直接弹出独立的原生设置窗口。
-- **Confirmed Decision 4（防多开单实例保护 + 开机自启开关）**：
-  - **防多开保护**：当程序已在运行时，再次双击 `AuraLine-Portable.exe` 不会启动第二个重叠窗口，而是自动唤醒已有实例的设置窗口并退出新进程。
-  - **开机自启开关**：在右下角系统托盘菜单与独立设置页面中同步提供 **“开机自动启动”** 开关（基于当前用户 `HKCU` 注册表项，无需管理员权限）。
+本计划基于 **[pbakaus/impeccable](https://github.com/pbakaus/impeccable)** 的核心工作流（`Context-Driven Design`、`/audit` 反 AI Slop 审查、`/distill` 降噪提纯、`/polish` 硬件级交互打磨、`/typeset` 精密排版）以及您选定的 **阿尔派 (Alpine) / 先锋 (Pioneer) 经典黑金拉丝铝车载仪器风** 进行全方位重构。
 
 ---
 
-## 1. Overview & Core Concept
+## 一、Impeccable 审美审计与反模式清理清单 (`/audit` & `/distill`)
 
-- **What It Does**：让 `AuraLine-Portable.exe` 在 Windows 办公电脑上具备真正商业级桌面软件的稳定性与顺手交互——暂停即静默休眠、滚轮即调隐蔽度、双击即改设置、开机自动常驻且绝不重复多开。
-- **Target Audience / Persona**：追求极致省心、每天开机即用 QQ 音乐办公听歌的桌面用户。
-- **Key Value**：解决 Windows WASAPI 暂停无回调的底层痛点，并提供零学习成本的直觉手势与系统级常驻体验。
-
----
-
-## 2. User Experience & Visual Design
-
-- **Key User Flows**：
-  1. **暂停即归零休眠**：QQ 音乐暂停后，细线光晕与 `-40dB` 音量条在 `0.15s` 内平滑消退；达到设定的静音时长（如 10s）后自动冻结为 `0 FPS`。
-  2. **滚轮与双击手势**：在桌面上无需打开设置页，鼠标指在细线上滚轮上下滑动即可让细线变淡/变亮（`20%–100%`）；双击细线立即弹出设置窗口。
-  3. **防多开与开机自启**：误触再次双击 `.exe` 时自动呼出设置面板而不会产生两条重叠细线；在设置页或托盘右键菜单一键开启“开机自动启动”。
+| 审计维度 | 现有代码中的 AI Slop / 视觉噪音 | Impeccable 重构方案 |
+| :--- | :--- | :--- |
+| **层级与容器 (`/distill`)** | `SettingsPage.tsx` 堆叠了 6 个 `rounded-xl bg-zinc-900/50 border` 独立卡片，内部又套一层带边框按钮（典型的 Cards-within-Cards 噪音）。 | 移除外层碎片化卡片套盒，改为**一体式深黑拉丝阳极氧化铝主机面板 (`#0A0A0C`) + `1px` 精密暗金/炭灰分割线 (`border-white/[0.07]`)**。 |
+| **装饰性图标与绿点 (`/quieter`)** | 每个分区标题前都有装饰性图标（`<LayoutPanelTop>`, `<BarChart3>`, `<Palette>`, `<Sliders>`, `<Cpu>`）；停靠选项右侧与预览顶栏有 `bg-emerald-400 rounded-full` / `animate-pulse` 呼吸绿点。 | 彻底移除所有装饰性标题图标与圆点；状态指示全部采用**等宽精密字符标签**（如 `NOMINAL · 60 FPS` / `STANDBY · 0 FPS`）。 |
+| **空间利用 (`/clarify`)** | 4 个任务栏停靠模式纵向排列占用了近 200px 高度，挤压了核心调节区。 | 浓缩为单行 4 段式**机头物理按键分段控制器（Segmented Selector）**：`最左贴合` · `图标右侧` · `托盘左侧` · `自由坐标`，下方配单行无框微字说明。 |
+| **控制组件质感 (`/polish`)** | 使用浏览器默认 `<input type="range" className="accent-zinc-200">`，缺乏阻尼刻度感且无法快速归位。 | 定制**黑金拉丝铝精密推子（Tactile Hardware Fader）**：支持**双击推子瞬间恢复出厂默认值**，右侧数值与单位（`px` / `%` / `x`）字号层级分离并强制 `tabular-nums`。 |
 
 ---
 
-## 3. Key Product Decisions & Trade-Offs
+## 二、分文件重构实施细节
 
-- **Decision 1：零外部依赖的 Rust 原生单实例锁与开机自启实现**
-  - *Chosen Approach*：使用本地回环端口监听实现单实例互斥与唤醒信号传递；使用 Windows 原生 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 静默注册开机自启，不引入任何容易导致云端编译冲突的第三方插件。
-  - *Why*：保证 GitHub Actions 云端编译 100% 稳定通过，同时无需管理员权限即可在受限办公电脑上正常启用开机自启。
+### 1. `/DESIGN.md`（新建：Impeccable 上下文设计规范）
+- 固化产品的核心身份（90 年代末 Pioneer Carrozzeria / Alpine CDA 旗舰车载机头 VFD 频谱仪）。
+- 明确 **60-30-10 色彩预算**：
+  - **60% 主机底盘**：深黑阳极氧化拉丝铝 (`#08080A` ~ `#0D0D10`)。
+  - **30% 结构与刻度**：VFD 深邃滤光玻璃 (`#040507`)、`1px` 精密分割线 (`rgba(255,255,255,0.07)`)、冷灰铭文 (`#71717A`)。
+  - **10% 仪器高光**：经典香槟琥珀金 (`#D4AF37` / `#F59E0B`) 与 VFD 荧光青 (`#00F5D4`)，仅用于当前激活档位与推子游标。
+- 明确字体与排版铁律：`Outfit`（机头型号与主标题）、`Plus Jakarta Sans`（正文控制项）、`JetBrains Mono` + `tabular-nums`（所有频率、像素、分贝、倍率读数）。
 
----
+### 2. `/src/index.css`（升级硬件级质感与推子样式）
+- 新增细腻的阳极氧化铝微纹理背景类与 VFD 玻璃内阴影样式。
+- 为自定义硬件推子（`<input type="range">`）编写跨内核的精密切削金属推柄（Chamfered Champagne Gold / Brushed Titanium Thumb）与刻度轨道样式，支持键盘方向键微调与 `:focus-visible` 高对比度焦点环。
 
-## 4. Technical Architecture & Data Strategy *(Technical Reference)*
+### 3. `/src/components/SettingsPage.tsx`（重构为先锋/阿尔派机头控制面板）
+- **顶部铭牌栏（Header Contract）**：左侧展示 `AURALINE // DEH-P99` 风格简洁标题与音频链路状态，右侧单一明确动作按钮（`退出程序`）。
+- **唯一视觉焦点：下沉式 VFD 真空荧光屏预览舱（Recessed VFD Stage）**：
+  - 内嵌深色滤光玻璃视窗，实时渲染 32 段 VFD 频谱。
+  - 底部自带真实车载均衡器频率坐标尺：`32Hz` · `64Hz` · `125Hz` · `250Hz` · `500Hz` · `1kHz` · `2kHz` · `4kHz` · `8kHz` · `16kHz`。
+  - 顶部左右两端以等宽数字实时显示当前主频段采样状态、可用任务栏槽位宽度（`SLOT 184px · 24 BANDS`）及不透明度。
+- **单层分割线控制矩阵（Zero-Card-Nesting）**：
+  - **01. 任务栏停靠位置**：单行 4 档分段按键 + 水平偏移推子（双击归零 `0px`）。
+  - **02. 频谱分辨率与峰值驻留**：`16 / 24 / 32 BANDS` 机械档位切换 + `PEAK-HOLD` 开关。
+  - **03. VFD 荧光灯珠滤色片**：6 款车载经典配色，以精致的三色荧光灯珠条块呈现，无多余花哨胶囊。
+  - **04. 几何尺寸与音频增益推子组**：整体不透明度（双击复位 `100%`）、最大总宽度（双击复位 `180px`）、柱体高度（双击复位 `26px`）、增益灵敏度（双击复位 `1.00x`）。
+  - **05. 静音归零与电源管理**：等待秒数档位（`5s / 10s / 30s / 60s`）与底部三联硬件开关（`开机自启` · `鼠标穿透` · `位置复位`）。
 
-```text
-┌─────────────────────────────────────────────────────────────────────────┐
-│                Standalone Windows .exe (Tauri v2 + Rust)                │
-│                                                                         │
-│  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │ Rust Native Core                                                  │  │
-│  │  • Single-Instance Guard: Local loopback lock -> wakes existing   │  │
-│  │  • WASAPI Watchdog: 100ms tick -> emits silence after 140ms idle  │  │
-│  │  • Auto-Start Manager: HKCU\...\Run\AuraLine query/set/remove     │  │
-│  │  • System Tray: Open Settings / Auto-Start / Click-Through / Quit │  │
-│  └───────────────────────────────┬───────────────────────────────────┘  │
-│                                  │ Tauri IPC                            │
-│                                  ▼                                      │
-│  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │ Desktop Bar Window (main) & Standalone Settings Window            │  │
-│  │  • Smooth Silence Decay: Melts glow in 150ms when audio pauses    │  │
-│  │  • Gesture Layer: onWheel (20%..100% Opacity) + onDoubleClick     │  │
-│  │  • Settings Window: Master Opacity + Auto-Start Toggle + Presets  │  │
-│  └───────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-- **Data Model & State**：
-  - `StealthLineSettings.masterOpacity`：`0.20` 至 `1.00` 的浮点数（默认 `1.0`），控制桌面细线整体不透明度。
-  - `AutoStartStatus`：布尔值，反映当前 `.exe` 路径是否已写入当前用户开机启动项。
+### 4. `/src/App.tsx`（净化 Web 预览顶栏与微交互）
+- 移除预览顶栏的 `animate-pulse` 呼吸绿点与胶囊边框，改为符合 Impeccable `/quieter` 原则的极简无框机头状态栏，所有按钮保证单行不折行（`whitespace-nowrap shrink-0`）。

@@ -1,21 +1,24 @@
 mod audio_loopback;
+mod taskbar_layout;
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use taskbar_layout::TaskbarAdaptiveConfig;
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Position, Size, WebviewUrl,
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Position, Size, State, WebviewUrl,
     WebviewWindow, WebviewWindowBuilder,
 };
 
 const SINGLE_INSTANCE_ADDR: &str = "127.0.0.1:49172";
 static CLICK_THROUGH_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// Single-instance protection:
-/// If another AuraLine.exe is already running, notifies it to focus/open Settings and exits immediately.
 fn acquire_single_instance_lock() -> Option<TcpListener> {
     match TcpListener::bind(SINGLE_INSTANCE_ADDR) {
         Ok(listener) => Some(listener),
@@ -119,6 +122,25 @@ fn set_auto_start_enabled(enabled: bool) -> Result<bool, String> {
 }
 
 #[tauri::command]
+fn update_taskbar_config(
+    state: State<'_, Arc<Mutex<TaskbarAdaptiveConfig>>>,
+    dock_mode: String,
+    offset_x: i32,
+    desired_width: i32,
+    desired_height: i32,
+    preferred_bands: u32,
+) -> Result<(), String> {
+    if let Ok(mut guard) = state.lock() {
+        guard.dock_mode = dock_mode;
+        guard.offset_x = offset_x;
+        guard.desired_width = desired_width;
+        guard.desired_height = desired_height;
+        guard.preferred_bands = preferred_bands;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn set_click_through(window: WebviewWindow, ignore: bool) -> Result<(), String> {
     CLICK_THROUGH_ACTIVE.store(ignore, Ordering::SeqCst);
     window
@@ -147,8 +169,8 @@ fn set_window_position(window: WebviewWindow, x: i32, y: i32) -> Result<(), Stri
 #[tauri::command]
 fn resize_main_bar_window(app: AppHandle, line_width: f64, line_height: f64) -> Result<(), String> {
     if let Some(main_win) = app.get_webview_window("main") {
-        let target_w = (line_width + 110.0).max(240.0);
-        let target_h = (line_height + 40.0).max(48.0);
+        let target_w = (line_width + 58.0).max(120.0);
+        let target_h = (line_height + 12.0).max(32.0);
         let _ = main_win.set_size(Size::Logical(LogicalSize {
             width: target_w,
             height: target_h,
@@ -180,14 +202,14 @@ fn reset_window_to_bottom_center(window: WebviewWindow) -> Result<(i32, i32), St
         let screen = monitor.size();
         let win_size = window
             .outer_size()
-            .unwrap_or(tauri::PhysicalSize { width: 480, height: 52 });
-        let x = ((screen.width as i32) - (win_size.width as i32)) / 2;
-        let y = (screen.height as i32) - (win_size.height as i32) - 96;
+            .unwrap_or(tauri::PhysicalSize { width: 272, height: 38 });
+        let x = 8;
+        let y = (screen.height as i32) - (win_size.height as i32) - 5;
         let _ = window.set_position(Position::Physical(PhysicalPosition { x, y }));
         return Ok((x, y));
     }
-    let _ = window.set_position(Position::Physical(PhysicalPosition { x: 400, y: 820 }));
-    Ok((400, 820))
+    let _ = window.set_position(Position::Physical(PhysicalPosition { x: 8, y: 1040 }));
+    Ok((8, 1040))
 }
 
 fn open_or_focus_settings_window(app: &AppHandle) {
@@ -203,8 +225,8 @@ fn open_or_focus_settings_window(app: &AppHandle) {
         "settings",
         WebviewUrl::App("index.html#settings".into()),
     )
-    .title("AuraLine — 隐身细线设置")
-    .inner_size(460.0, 600.0)
+    .title("AuraLine — 任务栏车载频谱设置")
+    .inner_size(480.0, 650.0)
     .resizable(false)
     .decorations(true)
     .transparent(false)
@@ -212,12 +234,12 @@ fn open_or_focus_settings_window(app: &AppHandle) {
     .build();
 }
 
-/// Generates a crisp 32x32 RGBA tray icon in memory (glowing acoustic line on dark rounded badge)
-/// so the Windows System Tray icon always renders cleanly without external file dependencies.
+/// Generates a 32x32 RGBA car stereo equalizer spectrum icon in memory for the Windows System Tray.
 fn build_embedded_tray_icon() -> Image<'static> {
     let width = 32usize;
     let height = 32usize;
     let mut rgba = vec![0u8; width * height * 4];
+    let bar_heights = [3usize, 6, 4, 7, 5, 3];
 
     for y in 0..height {
         for x in 0..width {
@@ -226,25 +248,42 @@ fn build_embedded_tray_icon() -> Image<'static> {
             let dy = (y as f32) - 15.5;
             let dist = (dx * dx + dy * dy).sqrt();
 
-            // Circular dark matte badge
             if dist <= 14.5 {
-                rgba[idx] = 18;
-                rgba[idx + 1] = 18;
-                rgba[idx + 2] = 24;
+                rgba[idx] = 14;
+                rgba[idx + 1] = 16;
+                rgba[idx + 2] = 22;
                 rgba[idx + 3] = 245;
 
-                // Acoustic glowing fine line across the center (y around 15..17, x 5..26)
-                if (5..=26).contains(&x) && (13..=18).contains(&y) {
-                    let norm_x = ((x - 5) as f32) / 21.0;
-                    let line_dist = ((y as f32) - 15.5).abs();
-                    if line_dist <= 1.6 {
-                        let r = (110.0 + 145.0 * (1.0 - (norm_x - 0.5).abs() * 1.8).max(0.0)) as u8;
-                        let g = (195.0 + 60.0 * (1.0 - norm_x)) as u8;
-                        let b = 255u8;
-                        rgba[idx] = r;
-                        rgba[idx + 1] = g;
-                        rgba[idx + 2] = b;
-                        rgba[idx + 3] = 255;
+                // Draw 6 miniature segmented VFD bars inside the circular tray badge
+                if (4..=27).contains(&x) && (7..=24).contains(&y) {
+                    let rel_x = x - 4;
+                    let bar_idx = rel_x / 4;
+                    let in_bar_col = (rel_x % 4) < 3;
+                    if bar_idx < 6 && in_bar_col {
+                        let seg_from_bottom = (24 - y) / 2;
+                        let is_seg_row = ((24 - y) % 2) == 0;
+                        let max_seg = bar_heights[bar_idx];
+                        if is_seg_row && seg_from_bottom <= max_seg {
+                            if seg_from_bottom == max_seg {
+                                // Peak-Hold Red/Coral Cap
+                                rgba[idx] = 244;
+                                rgba[idx + 1] = 63;
+                                rgba[idx + 2] = 94;
+                                rgba[idx + 3] = 255;
+                            } else if seg_from_bottom >= 5 {
+                                // Amber Mid
+                                rgba[idx] = 251;
+                                rgba[idx + 1] = 191;
+                                rgba[idx + 2] = 36;
+                                rgba[idx + 3] = 255;
+                            } else {
+                                // Classic VFD Ice Cyan
+                                rgba[idx] = 0;
+                                rgba[idx + 1] = 245;
+                                rgba[idx + 2] = 212;
+                                rgba[idx + 3] = 255;
+                            }
+                        }
                     }
                 }
             }
@@ -258,7 +297,7 @@ fn setup_system_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> 
     let open_settings = MenuItem::with_id(
         app,
         "open_settings",
-        "打开设置页面...",
+        "打开任务栏频谱设置...",
         true,
         None::<&str>,
     )?;
@@ -280,28 +319,28 @@ fn setup_system_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> 
     let theme_white = MenuItem::with_id(
         app,
         "theme_minimal_white",
-        "色彩预设：极简白",
+        "预设：经典车载 VFD (冰青+琥珀+红顶)",
         true,
         None::<&str>,
     )?;
     let theme_sea = MenuItem::with_id(
         app,
         "theme_deep_sea",
-        "色彩预设：深海静谧",
+        "预设：深海静谧 (靛蓝+电青+紫顶)",
         true,
         None::<&str>,
     )?;
     let theme_pulse = MenuItem::with_id(
         app,
         "theme_vibrant_pulse",
-        "色彩预设：活力律动",
+        "预设：复古琥珀 (暖橙+烈焰红+白顶)",
         true,
         None::<&str>,
     )?;
     let theme_forest = MenuItem::with_id(
         app,
         "theme_forest_mist",
-        "色彩预设：森屿微光",
+        "预设：极简纯白 (银灰+纯白顶)",
         true,
         None::<&str>,
     )?;
@@ -309,7 +348,7 @@ fn setup_system_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> 
     let reset_pos = MenuItem::with_id(
         app,
         "reset_position",
-        "重置细线到屏幕底部中央",
+        "重新对齐任务栏空白区",
         true,
         None::<&str>,
     )?;
@@ -338,7 +377,7 @@ fn setup_system_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> 
 
     let _tray = TrayIconBuilder::new()
         .icon(icon)
-        .tooltip("AuraLine — 隐身声学细线 (左键打开设置 / 右键快捷菜单)")
+        .tooltip("AuraLine — 任务栏车载 VFD 频谱仪 (左键打开设置 / 右键菜单)")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app_handle, event| {
@@ -416,25 +455,27 @@ fn setup_system_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 0. 单实例防多开保护：若已有实例在运行，唤醒其设置窗口并退出当前新进程
     let Some(instance_listener) = acquire_single_instance_lock() else {
         std::process::exit(0);
     };
 
+    let taskbar_cfg = Arc::new(Mutex::new(TaskbarAdaptiveConfig::default()));
+    let taskbar_cfg_for_setup = taskbar_cfg.clone();
+
     tauri::Builder::default()
+        .manage(taskbar_cfg)
         .setup(move |app| {
             let handle = app.handle().clone();
-            // 1. 启动单实例唤醒监听线程
             spawn_single_instance_wakeup_listener(instance_listener, handle.clone());
-            // 2. 初始化右下角 Windows 系统托盘图标与右键控制菜单
             let _ = setup_system_tray(&handle);
-            // 3. 启动 100% 纯输出端声卡回环监听 (仅限 default_output_device，物理禁用麦克风)
-            audio_loopback::spawn_soundcard_loopback(handle);
+            audio_loopback::spawn_soundcard_loopback(handle.clone());
+            taskbar_layout::spawn_taskbar_adaptive_watcher(handle, taskbar_cfg_for_setup);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_auto_start_enabled,
             set_auto_start_enabled,
+            update_taskbar_config,
             set_click_through,
             start_window_drag,
             get_window_position,
