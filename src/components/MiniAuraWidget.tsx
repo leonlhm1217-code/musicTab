@@ -166,8 +166,14 @@ export const MiniAuraWidget: React.FC<MiniAuraWidgetProps> = ({
             lastDormantSignature = sig;
           }
           return;
-        } else if (timestamp - lastFrameTime < 500) {
-          return;
+        } else {
+          if (lastDormantSignature !== '' && wrapperRef.current) {
+            wrapperRef.current.style.opacity = '1';
+            lastDormantSignature = '';
+          }
+          if (timestamp - lastFrameTime < 500) {
+            return;
+          }
         }
       } else {
         if (lastDormantSignature !== '' && wrapperRef.current) {

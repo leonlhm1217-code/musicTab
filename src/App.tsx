@@ -104,6 +104,8 @@ export default function App() {
 
   // Persisted drag position when taskbarDockMode === 'manual'
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>(loadSavedWebDragOffset);
+  const dragOffsetRef = useRef<{ x: number; y: number }>(dragOffset);
+  dragOffsetRef.current = dragOffset;
   const isDraggingRef = useRef<boolean>(false);
   const dragStartRef = useRef<{ startX: number; startY: number; origX: number; origY: number }>({
     startX: 0,
@@ -135,6 +137,7 @@ export default function App() {
 
   // Cross-window real-time settings synchronization + Win32 Taskbar Slot sensor subscription
   useEffect(() => {
+    let disposed = false;
     const onStorage = (e: StorageEvent) => {
       if (e.key === STORAGE_KEY && e.newValue) {
         try {
@@ -151,21 +154,34 @@ export default function App() {
 
     engineRef.current
       ?.subscribeToSettingsBroadcast((partial) => {
-        setSettings((prev) => ({ ...prev, ...partial }));
+        if (!disposed) {
+          setSettings((prev) => ({ ...prev, ...partial }));
+        }
       })
       .then((fn) => {
-        unlistenSettings = fn;
+        if (disposed) {
+          fn();
+        } else {
+          unlistenSettings = fn;
+        }
       });
 
     engineRef.current
       ?.subscribeToTaskbarSlot((slot) => {
-        setTaskbarSlot(slot);
+        if (!disposed) {
+          setTaskbarSlot(slot);
+        }
       })
       .then((fn) => {
-        unlistenTaskbar = fn;
+        if (disposed) {
+          fn();
+        } else {
+          unlistenTaskbar = fn;
+        }
       });
 
     return () => {
+      disposed = true;
       window.removeEventListener('storage', onStorage);
       if (unlistenSettings) unlistenSettings();
       if (unlistenTaskbar) unlistenTaskbar();
@@ -200,6 +216,7 @@ export default function App() {
 
   const handleResetPosition = useCallback(() => {
     setDragOffset({ x: 0, y: 0 });
+    dragOffsetRef.current = { x: 0, y: 0 };
     try {
       localStorage.setItem(WEB_DRAG_STORAGE_KEY, JSON.stringify({ x: 0, y: 0 }));
     } catch {
@@ -253,13 +270,28 @@ export default function App() {
     [clickThroughLocked, settings.masterOpacity, updateSettings]
   );
 
+  // Clean up wheel opacity hint timer on unmount
+  useEffect(() => {
+    return () => {
+      if (wheelHintTimerRef.current !== null) {
+        window.clearTimeout(wheelHintTimerRef.current);
+      }
+    };
+  }, []);
+
   // Automatically connect to output soundcard loopback on launch + init taskbar adaptive watcher
   useEffect(() => {
+    let disposed = false;
     const engine = engineRef.current;
     if (!engine) return;
 
     engine.startAutoConnect();
-    engine.getAutoStartEnabled().then(setAutoStartEnabled);
+    engine.getAutoStartEnabled().then((val) => {
+      if (!disposed) setAutoStartEnabled(val);
+    });
+    engine.getClickThroughEnabled().then((val) => {
+      if (!disposed) setClickThroughLocked(val);
+    });
 
     if (!engine.isSettingsWindow()) {
       const saved = loadSavedSettings();
@@ -270,6 +302,7 @@ export default function App() {
     let unlistenTray: (() => void) | null = null;
     engine
       .subscribeToTrayCommands((cmd) => {
+        if (disposed) return;
         if (cmd === 'set-click-through:true') {
           setClickThroughLocked(true);
         } else if (cmd === 'set-click-through:false') {
@@ -289,7 +322,11 @@ export default function App() {
         }
       })
       .then((fn) => {
-        unlistenTray = fn;
+        if (disposed) {
+          fn();
+        } else {
+          unlistenTray = fn;
+        }
       });
 
     const resumeOnFirstInteraction = () => {
@@ -298,6 +335,7 @@ export default function App() {
     window.addEventListener('pointerdown', resumeOnFirstInteraction, { once: true });
 
     return () => {
+      disposed = true;
       window.removeEventListener('pointerdown', resumeOnFirstInteraction);
       if (unlistenTray) unlistenTray();
       engine.stopAudioStream();
@@ -363,8 +401,8 @@ export default function App() {
     dragStartRef.current = {
       startX: e.clientX,
       startY: e.clientY,
-      origX: dragOffset.x,
-      origY: dragOffset.y,
+      origX: dragOffsetRef.current.x,
+      origY: dragOffsetRef.current.y,
     };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
@@ -375,6 +413,7 @@ export default function App() {
       x: dragStartRef.current.origX + (e.clientX - dragStartRef.current.startX),
       y: dragStartRef.current.origY + (e.clientY - dragStartRef.current.startY),
     };
+    dragOffsetRef.current = nextPos;
     setDragOffset(nextPos);
   };
 
@@ -383,7 +422,7 @@ export default function App() {
     isDraggingRef.current = false;
     e.currentTarget.releasePointerCapture(e.pointerId);
     try {
-      localStorage.setItem(WEB_DRAG_STORAGE_KEY, JSON.stringify(dragOffset));
+      localStorage.setItem(WEB_DRAG_STORAGE_KEY, JSON.stringify(dragOffsetRef.current));
     } catch {
       // ignore
     }
@@ -435,7 +474,7 @@ export default function App() {
   const simMaxWidth = Math.max(140, settings.lineWidth - simCrowdedFactor * 28);
   const effectiveWidth = isTauri
     ? taskbarSlot
-      ? Math.min(settings.lineWidth, taskbarSlot.availableWidth)
+      ? Math.max(100, Math.min(settings.lineWidth, taskbarSlot.availableWidth - 8))
       : settings.lineWidth
     : Math.min(settings.lineWidth, simMaxWidth);
 
@@ -479,7 +518,7 @@ export default function App() {
           ? '车载 VFD 频谱 · 手动自由拖拽模式 · 左键拖动位置 · 滚轮调透明度 · 双击打开设置'
           : '车载 VFD 频谱 · 已锁定在任务栏自动停靠槽位 · 滚轮调透明度 · 双击打开设置'
       }
-      className={`group relative flex items-center px-1 py-0.5 transition-all duration-200 ${
+      className={`group relative flex items-center px-1 py-0.5 transition-all duration-200 box-border ${
         clickThroughLocked
           ? 'pointer-events-none'
           : isManualDock

@@ -246,6 +246,15 @@ export class RealtimeAudioEngine {
     }
   }
 
+  public async getClickThroughEnabled(): Promise<boolean> {
+    if (!this.isRunningInTauri()) return false;
+    try {
+      return await invoke<boolean>('get_click_through_enabled');
+    } catch {
+      return false;
+    }
+  }
+
   public async setNativeClickThrough(ignore: boolean): Promise<void> {
     if (!this.isRunningInTauri()) return;
     try {

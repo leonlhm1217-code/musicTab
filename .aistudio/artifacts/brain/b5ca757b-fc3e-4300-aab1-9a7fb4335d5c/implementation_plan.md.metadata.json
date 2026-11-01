@@ -1,6 +1,6 @@
 {
-  "summary":  "基于 pbakaus/impeccable 设计框架与阿尔派/先锋黑金拉丝铝仪器风的重构计划：包含根目录 DESIGN.md 规范沉淀、设置面板去卡片化单层精密分割线重构、VFD 真空荧光屏频率刻度尺预览舱、支持双击复位的硬件级推子，以及 Web 预览顶栏去 AI 噪音打磨。",
-  "updatedAt":  "2026-10-30T12:03:10.135232003Z",
+  "summary":  "实施方案：修复 Windows 任务栏右侧（before_tray 及右侧停靠模式）频谱边缘截断与屏幕溢出问题。\n包含：\n1. Rust 端 Win32 托盘边界探测升级（高 DPI 自适应防侵入、Windows 11 托盘簇自适应预留 320~380px）\n2. 修复 before_tray 模式 rx 上限钳位算法缺陷，增设物理右边界硬约束\n3. 前端 App.tsx 与 MiniAuraWidget 容器内边距与 effectiveWidth 预算对齐，消除 overflow-hidden 裁切。",
+  "updatedAt":  "2026-11-01T06:34:36.278271853Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

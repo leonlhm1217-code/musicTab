@@ -55,6 +55,7 @@ fn now_epoch_ms() -> u64 {
 struct DspState {
     ring_buffer: Vec<f32>,
     hann_window: Vec<f32>,
+    fft: Arc<dyn rustfft::Fft<f32>>,
     prev_bass: f32,
     beat_cooldown: u32,
     smooth_pitch: f32,
@@ -67,9 +68,13 @@ impl DspState {
             .map(|i| 0.5 * (1.0 - (2.0 * PI * (i as f32) / ((FFT_SIZE - 1) as f32)).cos()))
             .collect();
 
+        let mut planner = FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(FFT_SIZE);
+
         Self {
             ring_buffer: Vec::with_capacity(FFT_SIZE * 2),
             hann_window,
+            fft,
             prev_bass: 0.0,
             beat_cooldown: 0,
             smooth_pitch: 0.0,
@@ -91,10 +96,15 @@ impl DspState {
         sample_rate: f32,
         device_name: &str,
     ) -> AudioTelemetryPayload {
+        if samples.is_empty() || sample_rate <= 0.0 || !sample_rate.is_finite() {
+            return AudioTelemetryPayload::silent(device_name);
+        }
+
         // 1. Time-domain RMS & 48-point downsampled waveform slice
         let mut sum_sq = 0.0_f32;
         for &s in samples {
-            sum_sq += s * s;
+            let clean = if s.is_finite() { s } else { 0.0 };
+            sum_sq += clean * clean;
         }
         let rms_raw = (sum_sq / (samples.len() as f32)).sqrt();
 
@@ -103,22 +113,20 @@ impl DspState {
             .iter()
             .step_by(step)
             .take(48)
-            .map(|&v| v.clamp(-1.0, 1.0))
+            .map(|&v| if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 })
             .collect();
 
-        // 2. Apply Hann window & run 1024-point FFT
+        // 2. Apply Hann window & run cached 1024-point FFT
         let mut buffer: Vec<Complex<f32>> = samples
             .iter()
             .zip(self.hann_window.iter())
             .map(|(&s, &w)| Complex {
-                re: s * w,
+                re: (if s.is_finite() { s } else { 0.0 }) * w,
                 im: 0.0,
             })
             .collect();
 
-        let mut planner = FftPlanner::<f32>::new();
-        let fft = planner.plan_fft_forward(FFT_SIZE);
-        fft.process(&mut buffer);
+        self.fft.process(&mut buffer);
 
         let half_bins = FFT_SIZE / 2;
         let hz_per_bin = sample_rate / (FFT_SIZE as f32);
@@ -454,19 +462,40 @@ fn push_and_emit(
     state: &Arc<Mutex<DspState>>,
     app: &AppHandle,
 ) {
-    let mut guard = match state.lock() {
-        Ok(g) => g,
-        Err(_) => return,
+    let latest_payload = {
+        let mut guard = match state.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+
+        let ch = channels.max(1);
+        for frame in interleaved.chunks(ch) {
+            let mut sum = 0.0_f32;
+            for &s in frame {
+                if s.is_finite() {
+                    sum += s;
+                }
+            }
+            let mono = sum / (frame.len() as f32);
+            guard.ring_buffer.push(mono);
+        }
+
+        // Prevent unbounded backlog on high-sample-rate devices (96kHz / 192kHz)
+        let max_backlog = FFT_SIZE * 4;
+        if guard.ring_buffer.len() > max_backlog {
+            let excess = guard.ring_buffer.len() - max_backlog;
+            guard.ring_buffer.drain(0..excess);
+        }
+
+        let mut last_processed = None;
+        while guard.ring_buffer.len() >= FFT_SIZE {
+            let block: Vec<f32> = guard.ring_buffer.drain(0..FFT_SIZE).collect();
+            last_processed = Some(guard.process_block(&block, sample_rate, device_name));
+        }
+        last_processed
     };
 
-    for frame in interleaved.chunks(channels.max(1)) {
-        let mono: f32 = frame.iter().sum::<f32>() / (frame.len() as f32);
-        guard.ring_buffer.push(mono);
-    }
-
-    while guard.ring_buffer.len() >= FFT_SIZE {
-        let block: Vec<f32> = guard.ring_buffer.drain(0..FFT_SIZE).collect();
-        let payload = guard.process_block(&block, sample_rate, device_name);
+    if let Some(payload) = latest_payload {
         let _ = app.emit("audio-telemetry", payload);
     }
 }

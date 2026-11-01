@@ -18,6 +18,7 @@ use tauri::{
 
 const SINGLE_INSTANCE_ADDR: &str = "127.0.0.1:49172";
 static CLICK_THROUGH_ACTIVE: AtomicBool = AtomicBool::new(false);
+static SETTINGS_WINDOW_CREATING: AtomicBool = AtomicBool::new(false);
 
 fn acquire_single_instance_lock() -> Option<TcpListener> {
     match TcpListener::bind(SINGLE_INSTANCE_ADDR) {
@@ -122,6 +123,11 @@ fn set_auto_start_enabled(enabled: bool) -> Result<bool, String> {
 }
 
 #[tauri::command]
+fn get_click_through_enabled() -> bool {
+    CLICK_THROUGH_ACTIVE.load(Ordering::SeqCst)
+}
+
+#[tauri::command]
 fn update_taskbar_config(
     state: State<'_, Arc<Mutex<TaskbarAdaptiveConfig>>>,
     dock_mode: String,
@@ -148,6 +154,12 @@ fn set_click_through(app: AppHandle, ignore: bool) -> Result<(), String> {
             .set_ignore_cursor_events(ignore)
             .map_err(|e| e.to_string())?;
     }
+    let payload = if ignore {
+        "set-click-through:true"
+    } else {
+        "set-click-through:false"
+    };
+    let _ = app.emit("tray-command", payload);
     Ok(())
 }
 
@@ -252,9 +264,16 @@ fn open_or_focus_settings_window(app: &AppHandle) {
         return;
     }
 
+    if SETTINGS_WINDOW_CREATING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
     let app_clone = app.clone();
     std::thread::spawn(move || {
-        if let Ok(win) = WebviewWindowBuilder::new(
+        let build_res = WebviewWindowBuilder::new(
             &app_clone,
             "settings",
             WebviewUrl::App("index.html".into()),
@@ -269,8 +288,11 @@ fn open_or_focus_settings_window(app: &AppHandle) {
         .decorations(true)
         .transparent(false)
         .center()
-        .build()
-        {
+        .build();
+
+        SETTINGS_WINDOW_CREATING.store(false, Ordering::SeqCst);
+
+        if let Ok(win) = build_res {
             attach_settings_window_close_guard(&win);
             let _ = win.show();
             let _ = win.set_focus();
@@ -522,6 +544,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_auto_start_enabled,
             set_auto_start_enabled,
+            get_click_through_enabled,
             update_taskbar_config,
             set_click_through,
             start_window_drag,
