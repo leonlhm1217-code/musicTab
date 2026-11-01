@@ -80,6 +80,96 @@ export const MiniAuraWidget: React.FC<MiniAuraWidgetProps> = ({
     let smoothedVolFill = 0;
     let lastDormantSignature = '';
 
+    const midZoneStart = Math.floor(totalSegments * 0.56);
+    const redZoneStart = Math.floor(totalSegments * 0.82);
+
+    // Pre-rendered offscreen canvases & palette cache to eliminate ~700 fillRect calls per frame
+    let cachedSpriteKey = '';
+    let lowPeakFillStyle = '';
+    let highPeakFillStyle = '';
+
+    const bgGridCanvas = document.createElement('canvas');
+    bgGridCanvas.width = width * dpr;
+    bgGridCanvas.height = vfdHeight * dpr;
+    const bgGridCtx = bgGridCanvas.getContext('2d');
+
+    const litColCanvas = document.createElement('canvas');
+    litColCanvas.width = colWidth * dpr;
+    litColCanvas.height = vfdHeight * dpr;
+    const litColCtx = litColCanvas.getContext('2d');
+
+    // Track previous frame's lit segment counts and peak indices for dirty-frame skipping
+    const prevLitCounts = new Int16Array(bandCount).fill(-1);
+    const prevPeakIndices = new Int16Array(bandCount).fill(-1);
+    let lastDrawnSpriteKey = '';
+
+    const ensureOffscreenSprites = (themeId: string, lightCanvasBg: boolean) => {
+      const key = `${themeId}:${lightCanvasBg ? 1 : 0}`;
+      if (cachedSpriteKey === key) {
+        return key;
+      }
+      cachedSpriteKey = key;
+      const p = AURA_THEMES[themeId as keyof typeof AURA_THEMES] ?? AURA_THEMES.minimal_white;
+      const [bR, bG, bB] = p.bassColor;
+      const [mR, mG, mB] = p.midColor;
+      const [tR, tG, tB] = p.trebleColor;
+
+      lowPeakFillStyle = `rgba(${mR}, ${mG}, ${mB}, 0.96)`;
+      highPeakFillStyle = `rgba(${tR}, ${tG}, ${tB}, 0.96)`;
+
+      // 1. Pre-render full unlit VFD vacuum fluorescent matrix onto bgGridCanvas
+      if (bgGridCtx) {
+        bgGridCtx.save();
+        bgGridCtx.setTransform(1, 0, 0, 1, 0, 0);
+        bgGridCtx.clearRect(0, 0, bgGridCanvas.width, bgGridCanvas.height);
+        bgGridCtx.scale(dpr, dpr);
+
+        const ghostCellColor = lightCanvasBg
+          ? 'rgba(24, 24, 27, 0.15)'
+          : 'rgba(255, 255, 255, 0.055)';
+        bgGridCtx.fillStyle = ghostCellColor;
+
+        for (let b = 0; b < bandCount; b++) {
+          const x = Math.floor(startOffsetX + b * (colWidth + colGap));
+          for (let s = 0; s < totalSegments; s++) {
+            const y = bottomBaselineY - (s + 1) * stepY;
+            bgGridCtx.fillRect(x, y, colWidth, segHeight);
+          }
+        }
+        bgGridCtx.restore();
+      }
+
+      // 2. Pre-render a single full-height lit VFD column onto litColCanvas
+      if (litColCtx) {
+        litColCtx.save();
+        litColCtx.setTransform(1, 0, 0, 1, 0, 0);
+        litColCtx.clearRect(0, 0, litColCanvas.width, litColCanvas.height);
+        litColCtx.scale(dpr, dpr);
+
+        for (let s = 0; s < totalSegments; s++) {
+          let r = bR;
+          let g = bG;
+          let bl = bB;
+          if (s >= redZoneStart) {
+            r = tR;
+            g = tG;
+            bl = tB;
+          } else if (s >= midZoneStart) {
+            r = mR;
+            g = mG;
+            bl = mB;
+          }
+          const segAlpha = Math.min(1.0, 0.82 + (s / totalSegments) * 0.18);
+          const y = bottomBaselineY - (s + 1) * stepY;
+          litColCtx.fillStyle = `rgba(${r}, ${g}, ${bl}, ${segAlpha.toFixed(3)})`;
+          litColCtx.fillRect(0, y, colWidth, segHeight);
+        }
+        litColCtx.restore();
+      }
+
+      return key;
+    };
+
     const sampleBandFrom32 = (bands32: number[] | undefined, idx: number): number => {
       if (!bands32 || bands32.length === 0) return 0;
       const srcLen = bands32.length;
@@ -105,31 +195,27 @@ export const MiniAuraWidget: React.FC<MiniAuraWidgetProps> = ({
     };
 
     const drawDormantVfdGrid = (liveSettings: StealthLineSettings) => {
+      const spriteKey = ensureOffscreenSprites(liveSettings.theme, !!liveSettings.lightCanvasBg);
       const currentPalette = AURA_THEMES[liveSettings.theme] ?? AURA_THEMES.minimal_white;
       const [bR, bG, bB] = currentPalette.bassColor;
 
       ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(bgGridCanvas, 0, 0);
       ctx.scale(dpr, dpr);
-      ctx.clearRect(0, 0, width, vfdHeight);
 
-      const ghostColor = liveSettings.lightCanvasBg
-        ? 'rgba(24, 24, 27, 0.13)'
-        : 'rgba(255, 255, 255, 0.05)';
-
+      // Faint standby floor pilot segment
+      ctx.fillStyle = `rgba(${bR}, ${bG}, ${bB}, 0.18)`;
       for (let b = 0; b < bandCount; b++) {
         const x = Math.floor(startOffsetX + b * (colWidth + colGap));
-        // Subtle unlit VFD vacuum display matrix
-        ctx.fillStyle = ghostColor;
-        for (let s = 0; s < totalSegments; s++) {
-          const y = bottomBaselineY - (s + 1) * stepY;
-          ctx.fillRect(x, y, colWidth, segHeight);
-        }
-        // Faint standby floor pilot segment
-        ctx.fillStyle = `rgba(${bR}, ${bG}, ${bB}, 0.18)`;
         ctx.fillRect(x, bottomBaselineY - stepY, colWidth, 1);
       }
 
       ctx.restore();
+      lastDrawnSpriteKey = `dormant:${spriteKey}`;
+      prevLitCounts.fill(-1);
+      prevPeakIndices.fill(-1);
 
       if (wrapperRef.current) {
         wrapperRef.current.style.opacity = '0.52';
@@ -139,10 +225,20 @@ export const MiniAuraWidget: React.FC<MiniAuraWidgetProps> = ({
       }
     };
 
+    const curLitCounts = new Int16Array(bandCount);
+    const curPeakIndices = new Int16Array(bandCount);
+
     const render = (timestamp: number) => {
       animId = requestAnimationFrame(render);
       const t = telemetryRef.current;
       const liveSettings = settingsRef.current;
+
+      // Fast path when already dormant in freeze mode: only check every 400ms
+      if (t.isSleeping && lastDormantSignature !== '') {
+        if (timestamp - lastFrameTime < 400) {
+          return;
+        }
+      }
 
       // Check if all peak caps have settled to 0 before freezing on Auto-Sleep
       let anyPeakRemaining = false;
@@ -165,6 +261,7 @@ export const MiniAuraWidget: React.FC<MiniAuraWidgetProps> = ({
             drawDormantVfdGrid(liveSettings);
             lastDormantSignature = sig;
           }
+          lastFrameTime = timestamp;
           return;
         } else {
           if (lastDormantSignature !== '' && wrapperRef.current) {
@@ -180,7 +277,7 @@ export const MiniAuraWidget: React.FC<MiniAuraWidgetProps> = ({
           wrapperRef.current.style.opacity = '1';
           lastDormantSignature = '';
         }
-        const frameInterval = liveSettings.workLowPower30Fps ? 33 : 16;
+        const frameInterval = liveSettings.workLowPower30Fps ? 33 : 20;
         if (timestamp - lastFrameTime < frameInterval) return;
       }
 
@@ -194,7 +291,7 @@ export const MiniAuraWidget: React.FC<MiniAuraWidgetProps> = ({
         if (beatFlash < 0.01) beatFlash = 0;
       }
 
-      // Bottom 1px stereo level underline (Visible ONLY when dbLevel > -40dB)
+      // Bottom 1px stereo level underline (Visible ONLY when dbLevel > -40dB, expanding from center outward)
       const isAboveMinus40dB = !t.isSleeping && t.dbLevel > -40;
       const targetFill = isAboveMinus40dB
         ? Math.max(0.03, Math.min(1.0, (t.dbLevel + 40) / 40))
@@ -202,49 +299,28 @@ export const MiniAuraWidget: React.FC<MiniAuraWidgetProps> = ({
       smoothedVolFill += (targetFill - smoothedVolFill) * 0.28;
 
       if (volumeTrackRef.current && volumeFillRef.current) {
-        volumeTrackRef.current.style.opacity = isAboveMinus40dB ? '0.82' : '0';
+        volumeTrackRef.current.style.opacity = isAboveMinus40dB ? '0.88' : '0';
         volumeFillRef.current.style.transform = `scale3d(${Math.max(
           0,
           Math.min(1, smoothedVolFill)
         ).toFixed(4)}, 1, 1)`;
       }
 
-      const currentPalette = AURA_THEMES[liveSettings.theme] ?? AURA_THEMES.minimal_white;
-      const [bR, bG, bB] = currentPalette.bassColor;
-      const [mR, mG, mB] = currentPalette.midColor;
-      const [tR, tG, tB] = currentPalette.trebleColor;
+      const spriteKey = ensureOffscreenSprites(liveSettings.theme, !!liveSettings.lightCanvasBg);
       const sens = liveSettings.auraSensitivity ?? 1.1;
       const elasticBoost = 1 + beatFlash * 0.14 * (liveSettings.elasticIntensity ?? 1.15);
+      const showCaps = liveSettings.showPeakHoldCaps ?? true;
 
-      ctx.save();
-      ctx.scale(dpr, dpr);
-      ctx.clearRect(0, 0, width, vfdHeight);
+      let frameDirty = lastDrawnSpriteKey !== spriteKey;
 
-      const ghostCellColor = liveSettings.lightCanvasBg
-        ? 'rgba(24, 24, 27, 0.15)'
-        : 'rgba(255, 255, 255, 0.055)';
-
-      const midZoneStart = Math.floor(totalSegments * 0.56);
-      const redZoneStart = Math.floor(totalSegments * 0.82);
-
+      // 1. Update physics and check if any column's discrete segment or peak cap changed
       for (let b = 0; b < bandCount; b++) {
-        const x = Math.floor(startOffsetX + b * (colWidth + colGap));
         const st = peakStates[b];
-
-        // 1. Draw unlit VFD vacuum fluorescent background matrix cells
-        ctx.fillStyle = ghostCellColor;
-        for (let s = 0; s < totalSegments; s++) {
-          const y = bottomBaselineY - (s + 1) * stepY;
-          ctx.fillRect(x, y, colWidth, segHeight);
-        }
-
-        // 2. Sample real-time energy for this frequency column
         const rawEnergy = t.isSleeping
           ? 0
           : sampleBandFrom32(t.spectrumBands, b) * sens * elasticBoost;
         const clampedEnergy = Math.max(0, Math.min(1.0, rawEnergy));
 
-        // Fast attack, crisp automotive VFD decay
         if (clampedEnergy >= st.smoothedEnergy) {
           st.smoothedEnergy = st.smoothedEnergy * 0.25 + clampedEnergy * 0.75;
         } else {
@@ -256,60 +332,82 @@ export const MiniAuraWidget: React.FC<MiniAuraWidgetProps> = ({
           totalSegments,
           Math.round(st.smoothedEnergy * totalSegments)
         );
+        curLitCounts[b] = litCount;
 
-        // 3. Draw active lit VFD LED segments from bottom to litCount
-        for (let s = 0; s < litCount; s++) {
-          const y = bottomBaselineY - (s + 1) * stepY;
-          let r = bR;
-          let g = bG;
-          let bl = bB;
-
-          if (s >= redZoneStart) {
-            r = tR;
-            g = tG;
-            bl = tB;
-          } else if (s >= midZoneStart) {
-            r = mR;
-            g = mG;
-            bl = mB;
-          }
-
-          const segAlpha = Math.min(1.0, 0.82 + (s / totalSegments) * 0.18);
-          ctx.fillStyle = `rgba(${r}, ${g}, ${bl}, ${segAlpha.toFixed(3)})`;
-          ctx.fillRect(x, y, colWidth, segHeight);
-        }
-
-        // 4. Classic Car Stereo Peak-Hold Floating & Falling Cap Block
-        if (liveSettings.showPeakHoldCaps ?? true) {
+        let effectivePeakIdx = -1;
+        if (showCaps) {
           const currentTopSeg = litCount;
           if (currentTopSeg >= st.peakSeg && currentTopSeg > 0) {
             st.peakSeg = currentTopSeg;
-            st.holdFrames = 15; // Hold floating at the peak for ~250ms
+            st.holdFrames = 15;
             st.velocity = 0;
           } else {
             if (st.holdFrames > 0) {
               st.holdFrames--;
             } else if (st.peakSeg > 0) {
-              st.velocity += 0.024; // Gravity acceleration downward
+              st.velocity += 0.024;
               st.peakSeg = Math.max(0, st.peakSeg - st.velocity);
             }
           }
 
           const peakIndex = Math.min(totalSegments - 1, Math.floor(st.peakSeg));
           if (st.peakSeg >= 0.85 && peakIndex >= litCount) {
-            const capY = bottomBaselineY - (peakIndex + 1) * stepY;
-            const isHighPeak = peakIndex >= midZoneStart;
-            const [cR, cG, cB] = isHighPeak
-              ? [tR, tG, tB]
-              : [mR, mG, mB];
-
-            ctx.fillStyle = `rgba(${cR}, ${cG}, ${cB}, 0.96)`;
-            ctx.fillRect(x, capY, colWidth, segHeight);
-
-            // Crisp top specular edge on the Peak-Hold block
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
-            ctx.fillRect(x, capY, colWidth, 1);
+            effectivePeakIdx = peakIndex;
           }
+        }
+        curPeakIndices[b] = effectivePeakIdx;
+
+        if (litCount !== prevLitCounts[b] || effectivePeakIdx !== prevPeakIndices[b]) {
+          frameDirty = true;
+        }
+      }
+
+      // Skip Canvas clear & redraw entirely if no column's integer segment state changed
+      if (!frameDirty) {
+        return;
+      }
+
+      lastDrawnSpriteKey = spriteKey;
+
+      // 2. Blit pre-rendered unlit VFD grid in a single drawImage call
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(bgGridCanvas, 0, 0);
+      ctx.scale(dpr, dpr);
+
+      // 3. Blit lit column sprites & peak caps
+      for (let b = 0; b < bandCount; b++) {
+        const litCount = curLitCounts[b];
+        const peakIndex = curPeakIndices[b];
+        prevLitCounts[b] = litCount;
+        prevPeakIndices[b] = peakIndex;
+
+        const x = Math.floor(startOffsetX + b * (colWidth + colGap));
+
+        if (litCount > 0) {
+          const topSegY = bottomBaselineY - litCount * stepY;
+          const cropH = vfdHeight - topSegY;
+          ctx.drawImage(
+            litColCanvas,
+            0,
+            topSegY * dpr,
+            colWidth * dpr,
+            cropH * dpr,
+            x,
+            topSegY,
+            colWidth,
+            cropH
+          );
+        }
+
+        if (peakIndex >= 0) {
+          const capY = bottomBaselineY - (peakIndex + 1) * stepY;
+          ctx.fillStyle = peakIndex >= midZoneStart ? highPeakFillStyle : lowPeakFillStyle;
+          ctx.fillRect(x, capY, colWidth, segHeight);
+
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+          ctx.fillRect(x, capY, colWidth, 1);
         }
       }
 
@@ -341,7 +439,7 @@ export const MiniAuraWidget: React.FC<MiniAuraWidgetProps> = ({
         />
       </div>
 
-      {/* Ultra-slender 1px VFD stereo level meter at the very bottom (Visible ONLY when volume > -40dB) */}
+      {/* Ultra-slender 1px VFD stereo level meter at the very bottom (Expands symmetrically from center to both sides when volume > -40dB) */}
       <div
         ref={volumeTrackRef}
         style={{
@@ -356,8 +454,8 @@ export const MiniAuraWidget: React.FC<MiniAuraWidgetProps> = ({
           ref={volumeFillRef}
           style={{
             transform: 'scale3d(0, 1, 1)',
-            transformOrigin: 'left center',
-            background: `linear-gradient(90deg, rgb(${bR},${bG},${bB}) 0%, rgb(${mR},${mG},${mB}) 60%, rgb(${tR},${tG},${tB}) 100%)`,
+            transformOrigin: 'center center',
+            background: `linear-gradient(90deg, rgb(${tR},${tG},${tB}) 0%, rgb(${mR},${mG},${mB}) 22%, rgb(${bR},${bG},${bB}) 50%, rgb(${mR},${mG},${mB}) 78%, rgb(${tR},${tG},${tB}) 100%)`,
           }}
           className="w-full h-full will-change-transform"
         />

@@ -1,69 +1,47 @@
-# Windows 任务栏右侧频谱边缘截断与溢出修复方案
+# 播放时（使用期间）CPU 占用深度优化方案 (Implementation Plan)
 
-## 1. 根因分析 (Root Cause Analysis)
+## 1. 播放期间持续 CPU 热点剖析
 
-经过排查 `src-tauri/src/taskbar_layout.rs`、`src/App.tsx` 与 `src/components/MiniAuraWidget.tsx`，确定导致打包后 Windows 桌面程序在任务栏右侧出现频谱边缘被截断及超出屏幕范围的根本原因有以下三点：
+在持续播放音乐或视频时，以下 4 个高频执行路径决定了 CPU 的实时负载：
 
-1. **Rust 端 `rx` 上界钳位公式严重缺陷 (Critical Clamp Flaw)**：
-   - 在 `cfg.dock_mode == "before_tray"` 计算中：
-     ```rust
-     let slot_right = scan.notify_left_x - (8.0 * scale).round() as i32;
-     let win_w = avail.min(max_total_w_phys).max(min_total_w_phys);
-     let rx = (slot_right - win_w + offset_x_phys)
-         .clamp(scan.tray_rect.left + 8, (slot_right - min_total_w_phys).max(scan.tray_rect.left + 8));
-     ```
-   - 此处钳位上限错误地使用了 `slot_right - min_total_w_phys`（例如 slot_right - 160），而非实际窗口宽度 `slot_right - win_w`（例如 slot_right - 340）。
-   - 一旦实际窗口宽度 `win_w` 大于最小宽度（默认 desired_width 为 320px），或者配置了 `offset_x` 偏移，计算出的窗口右边缘 `rx + win_w` 将直接超出 `slot_right` 达 120~180 像素，导致窗口直接冲出屏幕右边缘或深入系统托盘区。
+1. **音频回调在节流间隔内仍在做无效的 1024 点 FFT 运算 (`/src-tauri/src/audio_loopback.rs`)**
+   - WASAPI 环回流每 `10ms`（每秒 100 次）触发一次回调。当前代码虽然将 IPC 发送节流到了 `32ms`（约 30Hz），但在未满 `32ms` 的分支里仍然调用了 `guard.process_scratch_block(...)`，意味着每秒仍在后台执行 **50~100 次 1024 点复数 FFT + 512 次开方 + 32 次对数幂函数**，而其中约 2/3 的计算结果被直接丢弃。
 
-2. **Windows 11 系统托盘 `TrayNotifyWnd` 兼容性与高 DPI 探测失准**：
-   - 在 Windows 11 (22H2/23H2/24H2) 中，任务栏系统托盘部分由 XAML Island / 新版通知控制组件管理，当 `FindWindowExW(tray_hwnd, 0, "TrayNotifyWnd", ...)` 未能获取准确左边界时，代码直接 fallback 到了未缩放的固定值 `tray_rect.right - 220`。
-   - 在 125%、150% 或 200% 高 DPI 缩放下，Windows 11 的时钟、快速操作中心、输入法及折叠托盘箭头往往占据 320~440 物理像素。220px 的写死 fallback 使得 `notify_left_x` 严重偏右，将停靠槽位强行推入时钟与操作中心上方。
+2. **Canvas 每帧 700+ 次矩形绘制指令 (`fillRect`) 与无脏帧跳过 (`/src/components/MiniAuraWidget.tsx`)**
+   - 每帧重绘时，不仅要绘制动态亮起的频谱段，还要用双重循环逐格重绘 `32 柱 × 12 段 = 384 个` 静态暗色背景底格（`ghostCellColor`），导致每帧高达 700+ 次 GPU/Canvas 2D 状态提交。
+   - 当相邻两帧的各柱亮起格数 (`litCount`) 和峰值位置 (`peakIndex`) 完全未变时，仍然全量清空并重绘整个画布。
 
-3. **前端容器内边距预算与 `overflow-hidden` 裁切**：
-   - `taskbar_layout.rs` 派发的 `availableWidth` 为 logical 宽度，而 `App.tsx` 的外层容器使用了 `px-1` (左右各 4px = 8px)，且外层容器配置了 `overflow-hidden`。
-   - `MiniAuraWidget` 画布宽度直接采用 `effectiveWidth`。画布自身宽度加上左右 8px 容器内边距后，总内容尺寸超越了 Tauri 的物理窗口可视宽度，导致高频右侧的柱体或 Peak Cap 被 `overflow-hidden` 硬件裁切。
+3. **前端同时运行两个独立的 `requestAnimationFrame` 循环 (`/src/App.tsx` + `/src/components/MiniAuraWidget.tsx`)**
+   - `App.tsx` 运行一个 `requestAnimationFrame(tick)` 循环来调用 `engine.sampleTelemetry(...)`，而 `MiniAuraWidget.tsx` 又运行另一个 `requestAnimationFrame(render)` 循环。在 60Hz/144Hz 显示器上，每秒触发 120~288 次 JS 帧回调调度。
+
+4. **任务栏扫描器在窗口几何未变时仍定期触发 GDI `BitBlt` (`/src-tauri/src/taskbar_layout.rs`)**
+   - 即使任务栏窗口与托盘通知区句柄矩形完全未变，且已获得稳定的槽位坐标，后台线程仍每 2 秒向 DWM 请求一次 `BitBlt` 屏幕拷贝。
 
 ---
 
-## 2. 详细改造计划 (Implementation Steps)
+## 2. 深度优化方案 (Proposed Changes)
 
-### 步骤 1：修复 Rust 端右边界硬约束与托盘区域高 DPI 自适应探测 (`src-tauri/src/taskbar_layout.rs`)
-- **托盘左边界动态安全探测**：
-  - 引入基于 DPI 缩放的托盘保留区间预算：默认托盘保留物理像素设为 `(320.0 * scale).round() as i32`（高 DPI 下自动扩展至 400~480px）。
-  - 若 `TrayNotifyWnd` 窗口句柄探测成功，同时检查其子窗口（如时钟、操作中心）或采用 `notify_rect.left` 与 DPI 安全底线的保守取较小值（更靠左），防止穿透。
-- **重构 `before_tray` 模式定位算法**：
-  - 正确以上限 `slot_right - win_w` 进行 clamp：
-    ```rust
-    let max_allowed_x = slot_right - win_w;
-    let rx = (slot_right - win_w + offset_x_phys).clamp(scan.tray_rect.left + 8, max_allowed_x);
-    ```
-- **增加物理右边界终极硬防线 (Global Invariant)**：
-  - 在最终得出 `target_x_phys` 与 `target_win_w_phys` 后，强制执行：
-    ```rust
-    let max_safe_right = (scan.tray_rect.right - (12.0 * scale).round() as i32).min(slot_right);
-    if target_x_phys + target_win_w_phys > max_safe_right {
-        target_x_phys = max_safe_right - target_win_w_phys;
-    }
-    // 若受托盘挤压导致 x 越过左侧图标，则自动压缩窗口宽度，保证绝不溢出
-    if target_x_phys < slot_left {
-        target_x_phys = slot_left;
-        target_win_w_phys = (max_safe_right - slot_left).max(min_total_w_phys);
-    }
-    ```
+### A. Rust 音频线程：未到发送时间直接跳过 FFT 计算 (`/src-tauri/src/audio_loopback.rs`)
+- 在 `push_and_emit` 中，先将声卡采样推入 `ring_buffer`（保留最新的 `1024` 个采样点），然后**先判断 `now_ms.saturating_sub(guard.last_emit_ms) < 33`**：
+  - 若距离上次发送不足 `33ms`，**直接返回 `None`，完全不执行 `process_scratch_block`（跳过 Hann 窗、1024 点 FFT、幅度谱开方与分频段幂运算）**。
+  - 仅在达到 `33ms` 周期时，从 `ring_buffer` 尾部提取最新 `1024` 个样本执行 **1 次** FFT 并发送 IPC。这可将音频后台线程在播放期间的 CPU 运算量直接削减 **65% ~ 75%**。
 
-### 步骤 2：调整前端窗口布局与内边距安全余量 (`src/App.tsx` & `src/components/MiniAuraWidget.tsx`)
-- **前端宽度计算减除边距**：
-  - 在 `src/App.tsx` 中，计算 `effectiveWidth` 时为 Tauri 模式扣减容器内边距与右侧悬浮按钮预留空间：
-    ```typescript
-    const effectiveWidth = isTauri
-      ? taskbarSlot
-        ? Math.max(100, Math.min(settings.lineWidth, taskbarSlot.availableWidth - 8))
-        : settings.lineWidth
-      : Math.min(settings.lineWidth, simMaxWidth);
-    ```
-- **Tauri 窗口根容器容器对齐与抗裁剪处理**：
-  - 确保 Tauri 根容器具备精准的 `box-border`，并将内部 flex 布局设为紧凑无损对齐，确保画布最高频柱体完整显现且不被右边缘裁剪。
+### B. 离屏 Canvas 精灵缓存 (Offscreen Sprite Caching) + 脏帧跳过 (`/src/components/MiniAuraWidget.tsx`)
+- **离屏预渲染暗色背景格栅与满格亮起灯柱**：
+  - 在画布尺寸或主题变化时，一次性在内存离屏 Canvas (`bgGridCanvas`) 上绘制好全部静态暗色 VFD 底格；并在另一个仅 `colWidth × vfdHeight` 大小的离屏精灵 (`litColCanvas`) 上预渲染好一根满格亮起的三色渐变灯柱。
+  - **每帧绘制指令从 700+ 次骤降至 ~33 次**：每帧先用 **1 次 `ctx.drawImage(bgGridCanvas, 0, 0)`** 铺满全部背景底格，再对每根有能量的柱子用 **1 次 `ctx.drawImage` 裁剪贴图** 画出亮起部分。
+- **帧级脏检查 (Dirty-Frame Skip)**：
+  - 记录每一柱的 `(litCount, peakIndex)` 签名与底部音量条宽度。如果当前帧所有柱子的亮起格数和峰值块位置与上一帧完全一致，**直接跳过本帧 Canvas 绘制**。
 
-### 步骤 3：验证与构建检查
-- 执行 `compile_applet` 确保 TypeScript 与前端包构建无错误。
-- 确认无论是 Web 模拟预览环境，还是打包成 Windows 桌面端运行环境，右侧频谱都能紧凑呼吸、永不截断。
+### C. 合并采样与渲染循环 + 默认启用 30FPS 车载省电模式 (`/src/App.tsx`, `/src/types/audio.ts`)
+- **默认开启 30FPS 车载模式**：在 `/src/types/audio.ts` 中将 `DEFAULT_SETTINGS.workLowPower30Fps` 默认设为 `true`（约 30FPS，帧间隔 `33ms`，与后端 30Hz 音频包完美同步，用户仍可在设置中随时切换）。
+- **降低主采样循环频率**：在 `/src/App.tsx` 中用自适应定时器替代 60Hz/144Hz 的空转 `requestAnimationFrame`，消除高刷显示器下的空转回调开销。
+
+### D. 任务栏扫描器：稳态降频与跳过冗余 `BitBlt` (`/src-tauri/src/taskbar_layout.rs`)
+- 当任务栏已完成初始对齐且连续稳定（`stable_icons_right_x` 已锁定、任务栏矩形 `tray_rect` 与托盘 `notify_left_x` 未发生变动）时，跳过高频 GDI `BitBlt` 截屏，将像素复核周期拉长至 `6000ms`（6 秒），仅在检测到任务栏窗口矩形变化或用户调整设置时立即执行像素扫描。
+
+---
+
+## 3. 验证计划 (Verification Plan)
+1. 运行 `compile_applet` 与 `lint_applet` 验证前后端构建与类型安全。
+2. 确认离屏 Canvas 渲染视觉效果与原逐格绘制 100% 一致（保留冰青/琥珀/绯红分段与峰值悬浮下落动画），同时大幅降低播放期间的 CPU 占用。

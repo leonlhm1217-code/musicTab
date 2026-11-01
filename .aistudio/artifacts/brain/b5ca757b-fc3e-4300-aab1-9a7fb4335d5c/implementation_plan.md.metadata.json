@@ -1,6 +1,6 @@
 {
-  "summary":  "实施方案：修复 Windows 任务栏右侧（before_tray 及右侧停靠模式）频谱边缘截断与屏幕溢出问题。\n包含：\n1. Rust 端 Win32 托盘边界探测升级（高 DPI 自适应防侵入、Windows 11 托盘簇自适应预留 320~380px）\n2. 修复 before_tray 模式 rx 上限钳位算法缺陷，增设物理右边界硬约束\n3. 前端 App.tsx 与 MiniAuraWidget 容器内边距与 effectiveWidth 预算对齐，消除 overflow-hidden 裁切。",
-  "updatedAt":  "2026-11-01T06:34:36.278271853Z",
+  "summary":  "针对播放音频期间（使用时）持续 CPU 占用的深度优化方案：涵盖跳过间隔期内冗余 FFT 运算、离屏 Canvas 精灵缓存与脏帧跳过、合并双帧循环以及默认启用 30FPS 车载省电模式。",
+  "updatedAt":  "2026-11-01T07:37:23.860329636Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

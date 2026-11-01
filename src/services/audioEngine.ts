@@ -7,6 +7,8 @@ const NOTE_STRINGS = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#'
 const WINDOW_POS_STORAGE_KEY = 'auraline_window_pos_v1';
 const AUTO_START_FALLBACK_KEY = 'auraline_autostart_fallback_v1';
 const NUM_SPECTRUM_BANDS = 32;
+const ZERO_WAVEFORM_48: number[] = new Array(48).fill(0);
+const ZERO_SPECTRUM_32: number[] = new Array(NUM_SPECTRUM_BANDS).fill(0);
 
 export interface TauriTelemetryPayload {
   rmsVolume: number;
@@ -141,7 +143,7 @@ export class RealtimeAudioEngine {
       return true;
     } catch {
       try {
-        await getCurrentWindow().hide();
+        await getCurrentWindow().close();
         return true;
       } catch {
         return false;
@@ -551,30 +553,25 @@ export class RealtimeAudioEngine {
       const isStreamIdle = !this.latestNativePacket || packetAgeMs > 150;
 
       if (isStreamIdle && this.latestNativePacket) {
-        const prevBands = this.latestNativePacket.spectrumBands ?? new Array(NUM_SPECTRUM_BANDS).fill(0);
-        this.latestNativePacket = {
-          ...this.latestNativePacket,
-          rmsVolume:
-            this.latestNativePacket.rmsVolume < 0.01
-              ? 0
-              : this.latestNativePacket.rmsVolume * 0.72,
-          bassEnergy:
-            this.latestNativePacket.bassEnergy < 0.01
-              ? 0
-              : this.latestNativePacket.bassEnergy * 0.72,
-          midEnergy:
-            this.latestNativePacket.midEnergy < 0.01
-              ? 0
-              : this.latestNativePacket.midEnergy * 0.72,
-          trebleEnergy:
-            this.latestNativePacket.trebleEnergy < 0.01
-              ? 0
-              : this.latestNativePacket.trebleEnergy * 0.72,
-          spectrumBands: prevBands.map((v) => (v < 0.015 ? 0 : v * 0.68)),
-          dbLevel: -60,
-          dominantPitchHz: 0,
-          isBeat: false,
-        };
+        const pktNow = this.latestNativePacket;
+        const prevBands = pktNow.spectrumBands ?? ZERO_SPECTRUM_32;
+        const hasResidual =
+          pktNow.rmsVolume > 0 ||
+          pktNow.bassEnergy > 0 ||
+          prevBands.some((v) => v > 0);
+        if (hasResidual) {
+          this.latestNativePacket = {
+            ...pktNow,
+            rmsVolume: pktNow.rmsVolume < 0.01 ? 0 : pktNow.rmsVolume * 0.72,
+            bassEnergy: pktNow.bassEnergy < 0.01 ? 0 : pktNow.bassEnergy * 0.72,
+            midEnergy: pktNow.midEnergy < 0.01 ? 0 : pktNow.midEnergy * 0.72,
+            trebleEnergy: pktNow.trebleEnergy < 0.01 ? 0 : pktNow.trebleEnergy * 0.72,
+            spectrumBands: prevBands.map((v) => (v < 0.015 ? 0 : v * 0.68)),
+            dbLevel: -60,
+            dominantPitchHz: 0,
+            isBeat: false,
+          };
+        }
       }
 
       const pkt = this.latestNativePacket;
@@ -631,11 +628,11 @@ export class RealtimeAudioEngine {
         waveformSlice:
           !isStreamIdle && pkt?.waveformSlice && pkt.waveformSlice.length > 0
             ? pkt.waveformSlice
-            : new Array(48).fill(0),
+            : ZERO_WAVEFORM_48,
         spectrumBands:
           pkt?.spectrumBands && pkt.spectrumBands.length === NUM_SPECTRUM_BANDS
             ? pkt.spectrumBands
-            : new Array(NUM_SPECTRUM_BANDS).fill(0),
+            : ZERO_SPECTRUM_32,
         dominantInstrumentLabel: isSleeping
           ? '自动休眠省电中'
           : pkt?.deviceName
@@ -661,8 +658,8 @@ export class RealtimeAudioEngine {
         isBeat: false,
         springScale: 1.0,
         springVelocity: 0,
-        waveformSlice: new Array(48).fill(0),
-        spectrumBands: new Array(NUM_SPECTRUM_BANDS).fill(0),
+        waveformSlice: ZERO_WAVEFORM_48,
+        spectrumBands: ZERO_SPECTRUM_32,
         dominantInstrumentLabel: isSleeping ? '自动休眠省电中' : '声卡输出静默监听中',
         silentDurationSec,
         isSleeping,

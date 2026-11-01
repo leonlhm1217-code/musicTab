@@ -27,20 +27,6 @@
         "skipTaskbar": true,
         "resizable": false,
         "center": false
-      },
-      {
-        "label": "settings",
-        "title": "AuraLine — 任务栏车载频谱设置",
-        "url": "index.html#settings",
-        "width": 500,
-        "height": 700,
-        "minWidth": 440,
-        "minHeight": 540,
-        "visible": false,
-        "decorations": true,
-        "transparent": false,
-        "resizable": true,
-        "center": true
       }
     ],
     "security": {

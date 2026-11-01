@@ -13,7 +13,7 @@ use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Position, Size, State, WebviewUrl,
-    WebviewWindow, WebviewWindowBuilder,
+    WebviewWindowBuilder,
 };
 
 const SINGLE_INSTANCE_ADDR: &str = "127.0.0.1:49172";
@@ -218,7 +218,9 @@ async fn open_settings_window(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn close_settings_window(app: AppHandle) -> Result<(), String> {
     if let Some(settings_win) = app.get_webview_window("settings") {
-        let _ = settings_win.hide();
+        if settings_win.destroy().is_err() {
+            let _ = settings_win.close();
+        }
     }
     Ok(())
 }
@@ -246,16 +248,6 @@ fn reset_window_to_bottom_center(app: AppHandle) -> Result<(i32, i32), String> {
     Ok((8, 1040))
 }
 
-fn attach_settings_window_close_guard(settings_win: &WebviewWindow) {
-    let win_clone = settings_win.clone();
-    settings_win.on_window_event(move |event| {
-        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-            api.prevent_close();
-            let _ = win_clone.hide();
-        }
-    });
-}
-
 fn open_or_focus_settings_window(app: &AppHandle) {
     if let Some(existing) = app.get_webview_window("settings") {
         let _ = existing.show();
@@ -276,7 +268,7 @@ fn open_or_focus_settings_window(app: &AppHandle) {
         let build_res = WebviewWindowBuilder::new(
             &app_clone,
             "settings",
-            WebviewUrl::App("index.html".into()),
+            WebviewUrl::App("index.html#settings".into()),
         )
         .initialization_script(
             "window.__AURALINE_WINDOW_LABEL__ = 'settings'; window.location.hash = '#settings';",
@@ -293,7 +285,6 @@ fn open_or_focus_settings_window(app: &AppHandle) {
         SETTINGS_WINDOW_CREATING.store(false, Ordering::SeqCst);
 
         if let Ok(win) = build_res {
-            attach_settings_window_close_guard(&win);
             let _ = win.show();
             let _ = win.set_focus();
         }
@@ -532,9 +523,6 @@ pub fn run() {
         .manage(taskbar_cfg)
         .setup(move |app| {
             let handle = app.handle().clone();
-            if let Some(settings_win) = app.get_webview_window("settings") {
-                attach_settings_window_close_guard(&settings_win);
-            }
             spawn_single_instance_wakeup_listener(instance_listener, handle.clone());
             let _ = setup_system_tray(&handle);
             audio_loopback::spawn_soundcard_loopback(handle.clone());

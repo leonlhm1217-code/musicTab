@@ -169,7 +169,17 @@ export default function App() {
     engineRef.current
       ?.subscribeToTaskbarSlot((slot) => {
         if (!disposed) {
-          setTaskbarSlot(slot);
+          setTaskbarSlot((prev) => {
+            if (!prev) return slot;
+            const widthChanged = Math.abs(prev.availableWidth - slot.availableWidth) >= 4;
+            const heightChanged = Math.abs(prev.taskbarHeight - slot.taskbarHeight) >= 2;
+            const bandsChanged = prev.recommendedBands !== slot.recommendedBands;
+            const posChanged = Math.abs(prev.x - slot.x) >= 4 || Math.abs(prev.y - slot.y) >= 2;
+            if (!widthChanged && !heightChanged && !bandsChanged && !posChanged) {
+              return prev;
+            }
+            return slot;
+          });
         }
       })
       .then((fn) => {
@@ -342,37 +352,43 @@ export default function App() {
     };
   }, [handleResetPosition, updateSettings]);
 
-  // Real-time local sampling loop with Auto-Sleep CPU throttling
+  // Real-time local sampling loop with adaptive timer to avoid 144Hz/240Hz rAF wakeups
   useEffect(() => {
-    let rafId = 0;
-    let lastSampleTime = 0;
+    let timerId = 0;
+    let cancelled = false;
     let lastUiSync = 0;
 
-    const tick = (now: number) => {
-      rafId = requestAnimationFrame(tick);
+    const tick = () => {
+      if (cancelled) return;
       const engine = engineRef.current;
-      if (!engine) return;
+      if (engine) {
+        const now = performance.now();
+        const sample = engine.sampleTelemetry(
+          settings.elasticIntensity,
+          settings.autoSleepEnabled,
+          settings.autoSleepDelaySec
+        );
+        telemetryRef.current = sample;
 
-      const currentlySleeping = telemetryRef.current.isSleeping;
-      const pollInterval = currentlySleeping ? 200 : settings.workLowPower30Fps ? 32 : 16;
-      if (now - lastSampleTime < pollInterval) return;
-      lastSampleTime = now;
-
-      const sample = engine.sampleTelemetry(
-        settings.elasticIntensity,
-        settings.autoSleepEnabled,
-        settings.autoSleepDelaySec
-      );
-      telemetryRef.current = sample;
-
-      if (now - lastUiSync > 250) {
-        lastUiSync = now;
-        setIsSleepingState(sample.isSleeping);
+        if (now - lastUiSync > 400) {
+          lastUiSync = now;
+          setIsSleepingState((prev) => (prev === sample.isSleeping ? prev : sample.isSleeping));
+        }
       }
+
+      const nextDelay = telemetryRef.current.isSleeping
+        ? 400
+        : settings.workLowPower30Fps
+        ? 33
+        : 22;
+      timerId = window.setTimeout(tick, nextDelay);
     };
 
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
+    timerId = window.setTimeout(tick, 16);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timerId);
+    };
   }, [
     settings.elasticIntensity,
     settings.autoSleepEnabled,

@@ -107,7 +107,7 @@ export const DEFAULT_SETTINGS: StealthLineSettings = {
   theme: 'minimal_white',
   elasticIntensity: 1.15,
   auraSensitivity: 1.25,
-  workLowPower30Fps: false,
+  workLowPower30Fps: true,
   lightCanvasBg: false,
   autoSleepEnabled: true,
   autoSleepDelaySec: 10,

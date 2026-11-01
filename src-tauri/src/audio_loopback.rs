@@ -38,7 +38,7 @@ impl AudioTelemetryPayload {
             treble_energy: 0.0,
             dominant_pitch_hz: 0,
             is_beat: false,
-            waveform_slice: vec![0.0; 48],
+            waveform_slice: Vec::new(),
             spectrum_bands: vec![0.0; NUM_SPECTRUM_BANDS],
             device_name: device_name.to_string(),
         }
@@ -52,14 +52,27 @@ fn now_epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
+struct BandBinRange {
+    idx0: usize,
+    idx1: usize,
+    inv_count: f32,
+    freq_tilt: f32,
+}
+
 struct DspState {
     ring_buffer: Vec<f32>,
+    scratch_block: Vec<f32>,
     hann_window: Vec<f32>,
     fft: Arc<dyn rustfft::Fft<f32>>,
+    fft_buffer: Vec<Complex<f32>>,
+    magnitudes: Vec<f32>,
+    band_ranges: Vec<BandBinRange>,
+    cached_sample_rate: f32,
     prev_bass: f32,
     beat_cooldown: u32,
     smooth_pitch: f32,
     smoothed_bands: [f32; NUM_SPECTRUM_BANDS],
+    last_emit_ms: u64,
 }
 
 impl DspState {
@@ -71,14 +84,55 @@ impl DspState {
         let mut planner = FftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(FFT_SIZE);
 
-        Self {
-            ring_buffer: Vec::with_capacity(FFT_SIZE * 2),
+        let mut state = Self {
+            ring_buffer: Vec::with_capacity(FFT_SIZE * 4),
+            scratch_block: vec![0.0; FFT_SIZE],
             hann_window,
             fft,
+            fft_buffer: vec![Complex { re: 0.0, im: 0.0 }; FFT_SIZE],
+            magnitudes: vec![0.0; FFT_SIZE / 2],
+            band_ranges: Vec::with_capacity(NUM_SPECTRUM_BANDS),
+            cached_sample_rate: 0.0,
             prev_bass: 0.0,
             beat_cooldown: 0,
             smooth_pitch: 0.0,
             smoothed_bands: [0.0; NUM_SPECTRUM_BANDS],
+            last_emit_ms: 0,
+        };
+        state.ensure_band_ranges(48000.0);
+        state
+    }
+
+    fn ensure_band_ranges(&mut self, sample_rate: f32) {
+        if (self.cached_sample_rate - sample_rate).abs() < 1.0 && !self.band_ranges.is_empty() {
+            return;
+        }
+        self.cached_sample_rate = sample_rate;
+        self.band_ranges.clear();
+
+        let half_bins = FFT_SIZE / 2;
+        let hz_per_bin = (sample_rate / (FFT_SIZE as f32)).max(1.0);
+        let min_f = 32.0_f32;
+        let max_f = 16000.0_f32;
+        let ratio = max_f / min_f;
+
+        for b in 0..NUM_SPECTRUM_BANDS {
+            let t0 = (b as f32) / (NUM_SPECTRUM_BANDS as f32);
+            let t1 = ((b + 1) as f32) / (NUM_SPECTRUM_BANDS as f32);
+            let f0 = min_f * ratio.powf(t0);
+            let f1 = min_f * ratio.powf(t1);
+
+            let idx0 = ((f0 / hz_per_bin).floor() as usize).clamp(1, half_bins - 1);
+            let idx1 = ((f1 / hz_per_bin).ceil() as usize).clamp(idx0, half_bins - 1);
+            let inv_count = 1.0 / ((idx1 - idx0 + 1).max(1) as f32);
+            let freq_tilt = 16.0 + (b as f32) * 3.1;
+
+            self.band_ranges.push(BandBinRange {
+                idx0,
+                idx1,
+                inv_count,
+                freq_tilt,
+            });
         }
     }
 
@@ -90,112 +144,83 @@ impl DspState {
         self.smoothed_bands = [0.0; NUM_SPECTRUM_BANDS];
     }
 
-    fn process_block(
+    fn process_scratch_block(
         &mut self,
-        samples: &[f32],
         sample_rate: f32,
         device_name: &str,
     ) -> AudioTelemetryPayload {
-        if samples.is_empty() || sample_rate <= 0.0 || !sample_rate.is_finite() {
+        if self.scratch_block.len() < FFT_SIZE || sample_rate <= 0.0 || !sample_rate.is_finite() {
             return AudioTelemetryPayload::silent(device_name);
         }
 
-        // 1. Time-domain RMS & 48-point downsampled waveform slice
+        self.ensure_band_ranges(sample_rate);
+
+        // 1. Time-domain RMS & in-place Hann windowing into pre-allocated fft_buffer
         let mut sum_sq = 0.0_f32;
-        for &s in samples {
+        for i in 0..FFT_SIZE {
+            let s = self.scratch_block[i];
             let clean = if s.is_finite() { s } else { 0.0 };
             sum_sq += clean * clean;
-        }
-        let rms_raw = (sum_sq / (samples.len() as f32)).sqrt();
-
-        let step = (samples.len() / 48).max(1);
-        let waveform_slice: Vec<f32> = samples
-            .iter()
-            .step_by(step)
-            .take(48)
-            .map(|&v| if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 })
-            .collect();
-
-        // 2. Apply Hann window & run cached 1024-point FFT
-        let mut buffer: Vec<Complex<f32>> = samples
-            .iter()
-            .zip(self.hann_window.iter())
-            .map(|(&s, &w)| Complex {
-                re: (if s.is_finite() { s } else { 0.0 }) * w,
+            self.fft_buffer[i] = Complex {
+                re: clean * self.hann_window[i],
                 im: 0.0,
-            })
-            .collect();
+            };
+        }
+        let rms_raw = (sum_sq / (FFT_SIZE as f32)).sqrt();
 
-        self.fft.process(&mut buffer);
+        // 2. Run cached 1024-point FFT in-place
+        self.fft.process(&mut self.fft_buffer);
 
         let half_bins = FFT_SIZE / 2;
         let hz_per_bin = sample_rate / (FFT_SIZE as f32);
-        let norm_factor = (FFT_SIZE as f32) * 0.25;
+        let inv_norm = 1.0 / ((FFT_SIZE as f32) * 0.25);
+
+        let low_end = ((250.0 / hz_per_bin) as usize).clamp(1, half_bins - 1);
+        let mid_end = ((2500.0 / hz_per_bin) as usize).clamp(low_end, half_bins - 1);
+        let high_end = ((14000.0 / hz_per_bin) as usize).clamp(mid_end, half_bins - 1);
+        let pitch_start = ((65.0 / hz_per_bin) as usize).clamp(1, half_bins - 1);
+        let pitch_end = ((2400.0 / hz_per_bin) as usize).clamp(pitch_start, half_bins - 1);
 
         let mut low_sum = 0.0_f32;
-        let mut low_cnt = 0_u32;
         let mut mid_sum = 0.0_f32;
-        let mut mid_cnt = 0_u32;
         let mut high_sum = 0.0_f32;
-        let mut high_cnt = 0_u32;
-
         let mut max_mag = 0.0_f32;
         let mut max_bin = 0_usize;
 
-        let mut magnitudes = vec![0.0_f32; half_bins];
         for i in 1..half_bins {
-            let freq = (i as f32) * hz_per_bin;
-            let mag = buffer[i].norm() / norm_factor;
-            magnitudes[i] = mag;
+            let c = self.fft_buffer[i];
+            let mag = (c.re * c.re + c.im * c.im).sqrt() * inv_norm;
+            self.magnitudes[i] = mag;
 
-            if (20.0..=250.0).contains(&freq) {
+            if i <= low_end {
                 low_sum += mag;
-                low_cnt += 1;
-            } else if (250.0..=2500.0).contains(&freq) {
+            } else if i <= mid_end {
                 mid_sum += mag;
-                mid_cnt += 1;
-            } else if (2500.0..=14000.0).contains(&freq) {
+            } else if i <= high_end {
                 high_sum += mag;
-                high_cnt += 1;
             }
 
-            if (65.0..=2400.0).contains(&freq) && mag > max_mag {
+            if i >= pitch_start && i <= pitch_end && mag > max_mag {
                 max_mag = mag;
                 max_bin = i;
             }
         }
 
-        // 3. Extract 32 Logarithmic Frequency Bands (32 Hz to 16,000 Hz) with Car Stereo Equalizer Tilt
-        let min_f = 32.0_f32;
-        let max_f = 16000.0_f32;
-        let ratio = max_f / min_f;
+        // 3. Extract 32 Logarithmic Frequency Bands using precomputed bin table
         let mut spectrum_bands = Vec::with_capacity(NUM_SPECTRUM_BANDS);
-
         for b in 0..NUM_SPECTRUM_BANDS {
-            let t0 = (b as f32) / (NUM_SPECTRUM_BANDS as f32);
-            let t1 = ((b + 1) as f32) / (NUM_SPECTRUM_BANDS as f32);
-            let f0 = min_f * ratio.powf(t0);
-            let f1 = min_f * ratio.powf(t1);
-
-            let idx0 = ((f0 / hz_per_bin).floor() as usize).clamp(1, half_bins - 1);
-            let idx1 = ((f1 / hz_per_bin).ceil() as usize).clamp(idx0, half_bins - 1);
-
+            let range = &self.band_ranges[b];
             let mut band_peak = 0.0_f32;
             let mut band_sum = 0.0_f32;
-            let count = (idx1 - idx0 + 1).max(1) as f32;
-            for &m in &magnitudes[idx0..=idx1] {
+            for &m in &self.magnitudes[range.idx0..=range.idx1] {
                 if m > band_peak {
                     band_peak = m;
                 }
                 band_sum += m;
             }
-            let band_avg = (band_peak * 0.65) + (band_sum / count) * 0.35;
+            let band_avg = (band_peak * 0.65) + (band_sum * range.inv_count) * 0.35;
+            let raw_val = (band_avg * range.freq_tilt).powf(0.75).clamp(0.0, 1.0);
 
-            // Perceptual loudness tilt so mid/high frequencies dance as vividly as bass drums
-            let freq_tilt = 16.0 + (b as f32) * 3.1;
-            let raw_val = (band_avg * freq_tilt).powf(0.75).clamp(0.0, 1.0);
-
-            // Fast attack (0.72), crisp automotive VFD decay (0.58)
             let prev = self.smoothed_bands[b];
             let next = if raw_val > prev {
                 prev * 0.28 + raw_val * 0.72
@@ -206,21 +231,13 @@ impl DspState {
             spectrum_bands.push(self.smoothed_bands[b]);
         }
 
-        let bass_energy = if low_cnt > 0 {
-            ((low_sum / (low_cnt as f32)) * 18.0).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let mid_energy = if mid_cnt > 0 {
-            ((mid_sum / (mid_cnt as f32)) * 38.0).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let treble_energy = if high_cnt > 0 {
-            ((high_sum / (high_cnt as f32)) * 85.0).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        let low_cnt = low_end.max(1) as f32;
+        let mid_cnt = (mid_end.saturating_sub(low_end)).max(1) as f32;
+        let high_cnt = (high_end.saturating_sub(mid_end)).max(1) as f32;
+
+        let bass_energy = ((low_sum / low_cnt) * 18.0).clamp(0.0, 1.0);
+        let mid_energy = ((mid_sum / mid_cnt) * 38.0).clamp(0.0, 1.0);
+        let treble_energy = ((high_sum / high_cnt) * 85.0).clamp(0.0, 1.0);
 
         let energy_blend = bass_energy * 0.42 + mid_energy * 0.38 + treble_energy * 0.20;
         let rms_volume = (rms_raw * 3.2).max(energy_blend).clamp(0.0, 1.0);
@@ -266,7 +283,7 @@ impl DspState {
             treble_energy,
             dominant_pitch_hz,
             is_beat,
-            waveform_slice,
+            waveform_slice: Vec::new(),
             spectrum_bands,
             device_name: device_name.to_string(),
         }
@@ -412,7 +429,7 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
                     let mut was_silent_idle = false;
 
                     loop {
-                        std::thread::sleep(Duration::from_millis(100));
+                        std::thread::sleep(Duration::from_millis(300));
                         tick_count = tick_count.wrapping_add(1);
 
                         if stream_broken.load(Ordering::SeqCst) {
@@ -421,22 +438,24 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
 
                         let idle_ms =
                             now_epoch_ms().saturating_sub(last_callback_ms.load(Ordering::Relaxed));
-                        if idle_ms > 140 {
+                        if idle_ms > 200 {
+                            // Emit a single zeroed packet upon entering silence, then stay completely quiet
                             if !was_silent_idle {
                                 if let Ok(mut guard) = state.lock() {
                                     guard.reset_on_silence();
                                 }
+                                let _ = app.emit(
+                                    "audio-telemetry",
+                                    AudioTelemetryPayload::silent(&active_device_name),
+                                );
                                 was_silent_idle = true;
                             }
-                            let _ = app.emit(
-                                "audio-telemetry",
-                                AudioTelemetryPayload::silent(&active_device_name),
-                            );
                         } else {
                             was_silent_idle = false;
                         }
 
-                        if tick_count % 20 == 0 {
+                        // Check default output device change every ~2.4 seconds (8 * 300ms)
+                        if tick_count % 8 == 0 {
                             if let Some(current_out) = host.default_output_device() {
                                 if let Ok(current_name) = current_out.name() {
                                     if current_name != active_device_name {
@@ -449,7 +468,7 @@ pub fn spawn_soundcard_loopback(app: AppHandle) {
                 }
             }
 
-            std::thread::sleep(Duration::from_millis(400));
+            std::thread::sleep(Duration::from_millis(500));
         }
     });
 }
@@ -469,6 +488,7 @@ fn push_and_emit(
         };
 
         let ch = channels.max(1);
+        let inv_ch = 1.0 / (ch as f32);
         for frame in interleaved.chunks(ch) {
             let mut sum = 0.0_f32;
             for &s in frame {
@@ -476,23 +496,36 @@ fn push_and_emit(
                     sum += s;
                 }
             }
-            let mono = sum / (frame.len() as f32);
-            guard.ring_buffer.push(mono);
+            guard.ring_buffer.push(sum * inv_ch);
         }
 
-        // Prevent unbounded backlog on high-sample-rate devices (96kHz / 192kHz)
-        let max_backlog = FFT_SIZE * 4;
+        // Keep ring_buffer bounded to at most 2 * FFT_SIZE samples
+        let max_backlog = FFT_SIZE * 2;
         if guard.ring_buffer.len() > max_backlog {
-            let excess = guard.ring_buffer.len() - max_backlog;
+            let excess = guard.ring_buffer.len() - FFT_SIZE;
             guard.ring_buffer.drain(0..excess);
         }
 
-        let mut last_processed = None;
-        while guard.ring_buffer.len() >= FFT_SIZE {
-            let block: Vec<f32> = guard.ring_buffer.drain(0..FFT_SIZE).collect();
-            last_processed = Some(guard.process_block(&block, sample_rate, device_name));
+        if guard.ring_buffer.len() < FFT_SIZE {
+            return;
         }
-        last_processed
+
+        let now_ms = now_epoch_ms();
+        // Throttle FFT & IPC emission to ~30Hz (33ms minimum interval) BEFORE running 1024-point FFT
+        if now_ms.saturating_sub(guard.last_emit_ms) < 33 {
+            return;
+        }
+
+        // Copy the freshest FFT_SIZE window into pre-allocated scratch_block
+        let buf_len = guard.ring_buffer.len();
+        let start = buf_len - FFT_SIZE;
+        guard
+            .scratch_block
+            .copy_from_slice(&guard.ring_buffer[start..buf_len]);
+        guard.ring_buffer.clear();
+
+        guard.last_emit_ms = now_ms;
+        Some(guard.process_scratch_block(sample_rate, device_name))
     };
 
     if let Some(payload) = latest_payload {
