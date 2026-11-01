@@ -486,6 +486,7 @@ fn push_and_emit(
             Ok(g) => g,
             Err(_) => return,
         };
+        let dsp: &mut DspState = &mut *guard;
 
         let ch = channels.max(1);
         let inv_ch = 1.0 / (ch as f32);
@@ -496,36 +497,35 @@ fn push_and_emit(
                     sum += s;
                 }
             }
-            guard.ring_buffer.push(sum * inv_ch);
+            dsp.ring_buffer.push(sum * inv_ch);
         }
 
         // Keep ring_buffer bounded to at most 2 * FFT_SIZE samples
         let max_backlog = FFT_SIZE * 2;
-        if guard.ring_buffer.len() > max_backlog {
-            let excess = guard.ring_buffer.len() - FFT_SIZE;
-            guard.ring_buffer.drain(0..excess);
+        if dsp.ring_buffer.len() > max_backlog {
+            let excess = dsp.ring_buffer.len() - FFT_SIZE;
+            dsp.ring_buffer.drain(0..excess);
         }
 
-        if guard.ring_buffer.len() < FFT_SIZE {
+        if dsp.ring_buffer.len() < FFT_SIZE {
             return;
         }
 
         let now_ms = now_epoch_ms();
         // Throttle FFT & IPC emission to ~30Hz (33ms minimum interval) BEFORE running 1024-point FFT
-        if now_ms.saturating_sub(guard.last_emit_ms) < 33 {
+        if now_ms.saturating_sub(dsp.last_emit_ms) < 33 {
             return;
         }
 
         // Copy the freshest FFT_SIZE window into pre-allocated scratch_block
-        let buf_len = guard.ring_buffer.len();
+        let buf_len = dsp.ring_buffer.len();
         let start = buf_len - FFT_SIZE;
-        guard
-            .scratch_block
-            .copy_from_slice(&guard.ring_buffer[start..buf_len]);
-        guard.ring_buffer.clear();
+        dsp.scratch_block
+            .copy_from_slice(&dsp.ring_buffer[start..buf_len]);
+        dsp.ring_buffer.clear();
 
-        guard.last_emit_ms = now_ms;
-        Some(guard.process_scratch_block(sample_rate, device_name))
+        dsp.last_emit_ms = now_ms;
+        Some(dsp.process_scratch_block(sample_rate, device_name))
     };
 
     if let Some(payload) = latest_payload {
